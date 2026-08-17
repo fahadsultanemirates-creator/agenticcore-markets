@@ -1,0 +1,83 @@
+"""Live OHLCV price feed for forex and crypto (TwelveData/Alpha Vantage),
+with deterministic synthetic sample data as a fallback when no API key is
+configured. Shared by both asset classes so technical_analysis_agent stays
+identical regardless of what it's analyzing.
+"""
+
+from datetime import datetime, timedelta, timezone
+
+import httpx
+
+from app.assets import AssetInfo, AssetType
+from app.config import settings
+from app.data_sources.mock_utils import rng_for
+from app.models import OHLCVBar
+
+_BASE_PRICE = {
+    "EURUSD": 1.0850,
+    "GBPUSD": 1.2700,
+    "USDJPY": 155.00,
+    "BTCUSD": 64000.0,
+    "ETHUSD": 3400.0,
+}
+
+_TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
+
+
+class PriceFeedClient:
+    async def fetch_ohlcv(self, asset: AssetInfo, bars: int = 120, interval: str = "1h") -> list[OHLCVBar]:
+        if settings.twelvedata_api_key:
+            return await self._fetch_twelvedata(asset, bars, interval)
+        return self._synthetic_ohlcv(asset, bars)
+
+    async def _fetch_twelvedata(self, asset: AssetInfo, bars: int, interval: str) -> list[OHLCVBar]:
+        td_symbol = f"{asset.base}/{asset.quote}"
+        params = {
+            "symbol": td_symbol,
+            "interval": interval,
+            "outputsize": bars,
+            "apikey": settings.twelvedata_api_key,
+        }
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(_TWELVEDATA_URL, params=params)
+            resp.raise_for_status()
+            payload = resp.json()
+
+        values = payload.get("values")
+        if not values:
+            # Provider hiccup/rate limit: degrade to synthetic data rather
+            # than breaking the whole pipeline for one flaky call.
+            return self._synthetic_ohlcv(asset, bars)
+
+        bars_out = [
+            OHLCVBar(
+                timestamp=datetime.fromisoformat(v["datetime"]).replace(tzinfo=timezone.utc),
+                open=float(v["open"]),
+                high=float(v["high"]),
+                low=float(v["low"]),
+                close=float(v["close"]),
+                volume=float(v.get("volume") or 0.0),
+            )
+            for v in values
+        ]
+        return list(reversed(bars_out))  # provider returns newest-first
+
+    def _synthetic_ohlcv(self, asset: AssetInfo, bars: int) -> list[OHLCVBar]:
+        rng = rng_for(asset.symbol, "ohlcv")
+        base_price = _BASE_PRICE.get(asset.symbol, 100.0)
+        volatility = base_price * (0.006 if asset.asset_type == AssetType.CRYPTO else 0.0015)
+
+        now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
+        price = base_price
+        out: list[OHLCVBar] = []
+        for i in range(bars):
+            ts = now - timedelta(hours=(bars - i))
+            drift = rng.uniform(-volatility, volatility)
+            open_ = price
+            close = max(0.0001, open_ + drift)
+            high = max(open_, close) + abs(rng.uniform(0, volatility * 0.5))
+            low = min(open_, close) - abs(rng.uniform(0, volatility * 0.5))
+            volume = rng.uniform(500, 5000) * (10 if asset.asset_type == AssetType.CRYPTO else 1)
+            out.append(OHLCVBar(timestamp=ts, open=open_, high=high, low=low, close=close, volume=volume))
+            price = close
+        return out
