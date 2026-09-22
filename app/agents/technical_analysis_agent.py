@@ -8,12 +8,27 @@ untouched once the forex pipeline is proven out.
 
 from datetime import datetime, timezone
 
-from app.agents.indicators import ema_series, macd, rsi, sma, support_resistance
+from app.agents.indicators import (
+    atr,
+    detect_rsi_divergence,
+    ema_series,
+    macd,
+    rsi,
+    rsi_series,
+    sma,
+    support_resistance,
+    volume_profile_poc,
+)
 from app.agents.scoring import clamp as _clamp
 from app.agents.scoring import sentiment_from_score as _sentiment_from_score
 from app.assets import AssetInfo
 from app.data_sources.price_feed import PriceFeedClient
 from app.models import Sentiment, TechnicalAnalysisResult, TechnicalIndicators
+
+# 250 hourly bars (~10 days) gives the 200-period EMA enough warm-up to be
+# meaningful -- with only 120 bars its seed value (the series' first close)
+# still carries too much weight.
+_BARS_FOR_ANALYSIS = 250
 
 
 class TechnicalAnalysisAgent:
@@ -21,8 +36,11 @@ class TechnicalAnalysisAgent:
         self._price_feed = price_feed or PriceFeedClient()
 
     async def analyze(self, asset: AssetInfo) -> TechnicalAnalysisResult:
-        bars = await self._price_feed.fetch_ohlcv(asset, bars=120)
+        bars = await self._price_feed.fetch_ohlcv(asset, bars=_BARS_FOR_ANALYSIS)
         closes = [bar.close for bar in bars]
+        highs = [bar.high for bar in bars]
+        lows = [bar.low for bar in bars]
+        volumes = [bar.volume for bar in bars]
         current_price = closes[-1]
 
         rsi_14 = rsi(closes, 14)
@@ -31,7 +49,12 @@ class TechnicalAnalysisAgent:
         sma_50 = sma(closes, 50)
         ema_12 = ema_series(closes, 12)[-1]
         ema_26 = ema_series(closes, 26)[-1]
+        ema_50 = ema_series(closes, 50)[-1]
+        ema_200 = ema_series(closes, 200)[-1]
+        atr_14 = atr(highs, lows, closes, 14)
         support, resistance = support_resistance(closes, current_price)
+        volume_poc = volume_profile_poc(highs, lows, closes, volumes)
+        rsi_divergence = detect_rsi_divergence(closes, rsi_series(closes, 14))
 
         indicators = TechnicalIndicators(
             rsi_14=rsi_14,
@@ -42,6 +65,9 @@ class TechnicalAnalysisAgent:
             sma_50=sma_50,
             ema_12=ema_12,
             ema_26=ema_26,
+            ema_50=ema_50,
+            ema_200=ema_200,
+            atr_14=atr_14,
         )
 
         rsi_score = _clamp((rsi_14 - 50) / 50)
@@ -54,11 +80,32 @@ class TechnicalAnalysisAgent:
         else:
             trend_score = _clamp((current_price - sma_50) / sma_50 * 5)
 
-        score = _clamp((rsi_score + macd_score + trend_score) / 3)
+        # 50/200 EMA alignment ("golden"/"death" cross structure) -- the
+        # higher-timeframe counterpart to the sma20/50-based trend_score
+        # above, per the "50/200 EMA slope confirms whether momentum backs
+        # the thesis" criterion.
+        if current_price > ema_50 > ema_200:
+            ema_alignment_score = 1.0
+        elif current_price < ema_50 < ema_200:
+            ema_alignment_score = -1.0
+        else:
+            ema_alignment_score = _clamp((current_price - ema_200) / ema_200 * 5)
+
+        score = _clamp((rsi_score + macd_score + trend_score + ema_alignment_score) / 4)
+        # Divergence is a leading-exhaustion signal, not a component
+        # weighted equally with the others -- it nudges the composite
+        # rather than dominating it.
+        if rsi_divergence == "bullish":
+            score = _clamp(score + 0.15)
+        elif rsi_divergence == "bearish":
+            score = _clamp(score - 0.15)
+
         sentiment = _sentiment_from_score(score)
         trend = _sentiment_from_score(trend_score)
 
-        summary = _build_summary(rsi_14, macd_hist, current_price, sma_20, sma_50, support, resistance, trend)
+        summary = _build_summary(
+            rsi_14, macd_hist, current_price, sma_20, sma_50, ema_50, ema_200, atr_14, volume_poc, rsi_divergence, support, resistance, trend
+        )
 
         return TechnicalAnalysisResult(
             symbol=asset.symbol,
@@ -67,6 +114,8 @@ class TechnicalAnalysisAgent:
             indicators=indicators,
             support_levels=support,
             resistance_levels=resistance,
+            volume_poc=volume_poc,
+            rsi_divergence=rsi_divergence,
             trend=trend,
             sentiment=sentiment,
             score=score,
@@ -80,6 +129,11 @@ def _build_summary(
     price: float,
     sma_20: float,
     sma_50: float,
+    ema_50: float,
+    ema_200: float,
+    atr_14: float,
+    volume_poc: float,
+    rsi_divergence: str | None,
     support: list[float],
     resistance: list[float],
     trend: Sentiment,
@@ -93,10 +147,22 @@ def _build_summary(
         Sentiment.BEARISH: "trading below both the 20- and 50-period moving averages, indicating an established downtrend",
         Sentiment.NEUTRAL: "chopping around its short-term moving averages with no clear trend",
     }[trend]
+    ema_note = (
+        "the 50-EMA sits above the 200-EMA, confirming higher-timeframe bullish structure"
+        if ema_50 > ema_200
+        else "the 50-EMA sits below the 200-EMA, confirming higher-timeframe bearish structure"
+    )
+    divergence_note = (
+        f" A {rsi_divergence} RSI divergence is present, warning the recent {'low' if rsi_divergence == 'bullish' else 'high'} may be losing momentum."
+        if rsi_divergence
+        else ""
+    )
 
     return (
         f"RSI(14) at {rsi_14:.1f} is in {rsi_note}. "
         f"MACD histogram is {macd_note}. "
-        f"Price ({price:.4f}) is {trend_note}. "
-        f"Nearest support at {support[0]:.4f}, nearest resistance at {resistance[0]:.4f}."
+        f"Price ({price:.4f}) is {trend_note}, and {ema_note}. "
+        f"ATR(14) of {atr_14:.4f} sets the current volatility baseline for stop sizing. "
+        f"Nearest support at {support[0]:.4f}, nearest resistance at {resistance[0]:.4f}, "
+        f"with the highest-volume node (point of control) at {volume_poc:.4f}.{divergence_note}"
     )

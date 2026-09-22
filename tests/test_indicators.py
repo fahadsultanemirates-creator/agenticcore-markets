@@ -1,4 +1,14 @@
-from app.agents.indicators import ema_series, macd, rsi, sma, support_resistance
+from app.agents.indicators import (
+    atr,
+    detect_rsi_divergence,
+    ema_series,
+    macd,
+    rsi,
+    rsi_series,
+    sma,
+    support_resistance,
+    volume_profile_poc,
+)
 
 
 def test_sma_basic():
@@ -42,3 +52,62 @@ def test_support_resistance_brackets_current_price():
     support, resistance = support_resistance(closes, current_price=100, window=1)
     assert all(level < 100 for level in support) or support == [min(closes)]
     assert all(level > 100 for level in resistance) or resistance == [max(closes)]
+
+
+def test_atr_zero_when_no_range():
+    closes = [100.0] * 10
+    assert atr(closes, closes, closes, period=14) == 0.0
+
+
+def test_atr_positive_for_ranging_series():
+    highs = [101.0, 102.0, 101.5, 103.0, 102.5]
+    lows = [99.0, 99.5, 100.0, 100.5, 101.0]
+    closes = [100.0, 101.0, 100.5, 102.0, 101.5]
+    assert atr(highs, lows, closes, period=3) > 0.0
+
+
+def test_rsi_series_length_matches_input():
+    values = [float(i) for i in range(30)]
+    series = rsi_series(values, 14)
+    assert len(series) == len(values)
+
+
+def test_rsi_series_last_value_matches_rsi():
+    values = [100 + (i % 5) - (i % 3) for i in range(30)]
+    values = [float(v) for v in values]
+    assert abs(rsi_series(values, 14)[-1] - rsi(values, 14)) < 1e-9
+
+
+def test_detect_rsi_divergence_bearish_on_higher_high_lower_rsi_high():
+    n = 40
+    closes = [100 + 0.01 * i for i in range(n)]
+    closes[10] += 5  # first peak
+    closes[30] += 8  # higher high (rising baseline + bigger spike)
+    rsi_values = [50 - 0.01 * i for i in range(n)]
+    rsi_values[10] += 20  # first peak: high RSI
+    rsi_values[30] += 10  # second peak: lower RSI high -> bearish divergence
+
+    assert detect_rsi_divergence(closes, rsi_values, lookback=n, pivot_window=3) == "bearish"
+
+
+def test_detect_rsi_divergence_bullish_on_lower_low_higher_rsi_low():
+    n = 40
+    closes = [100 - 0.01 * i for i in range(n)]
+    closes[10] -= 5  # first dip
+    closes[30] -= 8  # lower low (falling baseline + bigger dip)
+    rsi_values = [50 + 0.01 * i for i in range(n)]
+    rsi_values[10] -= 20  # first dip: low RSI
+    rsi_values[30] -= 10  # second dip: higher RSI low -> bullish divergence
+
+    assert detect_rsi_divergence(closes, rsi_values, lookback=n, pivot_window=3) == "bullish"
+
+
+def test_detect_rsi_divergence_none_when_insufficient_history():
+    assert detect_rsi_divergence([1.0, 2.0, 3.0], [50.0, 51.0, 52.0], lookback=40) is None
+
+
+def test_volume_profile_poc_finds_high_volume_price_level():
+    closes = [100.0] * 5 + [110.0] * 20 + [120.0] * 5
+    volumes = [10.0] * len(closes)
+    poc = volume_profile_poc(closes, closes, closes, volumes, num_bins=20)
+    assert abs(poc - 110.0) <= 1.0  # within one bin width of the dominant price level

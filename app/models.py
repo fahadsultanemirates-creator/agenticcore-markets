@@ -38,6 +38,9 @@ class TechnicalIndicators(BaseModel):
     sma_50: float
     ema_12: float
     ema_26: float
+    ema_50: float
+    ema_200: float
+    atr_14: float
 
 
 class TechnicalAnalysisResult(BaseModel):
@@ -47,6 +50,8 @@ class TechnicalAnalysisResult(BaseModel):
     indicators: TechnicalIndicators
     support_levels: list[float]
     resistance_levels: list[float]
+    volume_poc: float  # point of control: the high-volume-node price level
+    rsi_divergence: str | None  # "bullish" | "bearish" | None
     trend: Sentiment
     sentiment: Sentiment
     score: float  # -1.0 (max bearish) .. +1.0 (max bullish)
