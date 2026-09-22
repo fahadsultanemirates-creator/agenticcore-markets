@@ -36,6 +36,14 @@ def test_analysis_endpoint_btcusd():
     assert body["asset_type"] == "crypto"
 
 
+def test_analysis_endpoint_acusd_includes_safety_gate():
+    resp = client.get("/api/v1/analysis/ACUSD")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["symbol"] == "ACUSD"
+    assert body["fundamentals"]["safety"]["has_contract"] is True
+
+
 def test_analysis_endpoint_unknown_symbol_returns_404():
     resp = client.get("/api/v1/analysis/DOGEUSD")
     assert resp.status_code == 404

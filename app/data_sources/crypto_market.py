@@ -10,6 +10,7 @@ from app.data_sources.mock_utils import rng_for
 from app.models import OnChainMetrics
 
 _COINGECKO_URL = "https://api.coingecko.com/api/v3/coins/{coin_id}"
+_COINGECKO_GLOBAL_URL = "https://api.coingecko.com/api/v3/global"
 
 _COINGECKO_IDS = {
     "BTC": "bitcoin",
@@ -19,6 +20,14 @@ _COINGECKO_IDS = {
 _BASE_MARKET_CAP = {
     "BTC": 1_260_000_000_000.0,
     "ETH": 410_000_000_000.0,
+}
+
+_BASE_FDV_MULTIPLIER = {
+    # BTC/ETH have no meaningful FDV gap (supply is ~fully circulating or
+    # uncapped-but-not-inflationary in a way that matters here) -- keep the
+    # synthetic fallback realistic rather than fabricating a dilution story.
+    "BTC": 1.02,
+    "ETH": 1.0,
 }
 
 _CIRCULATING_SUPPLY = {
@@ -40,15 +49,19 @@ _ECOSYSTEM_NOTES = {
 
 class CryptoMarketClient:
     async def fetch_market_snapshot(self, asset: AssetInfo) -> dict:
-        if settings.coingecko_api_key:
-            return await self._fetch_coingecko(asset)
-        return self._synthetic_market_snapshot(asset)
-
-    async def _fetch_coingecko(self, asset: AssetInfo) -> dict:
+        # CoinGecko's basic market-data endpoint is keyless-usable (the
+        # setting only raises the rate limit when present) -- unlike
+        # TwelveData, there's no reason to gate the live attempt behind
+        # having a key at all, only to fall back gracefully if it fails.
         coin_id = _COINGECKO_IDS.get(asset.base)
         if coin_id is None:
             return self._synthetic_market_snapshot(asset)
+        try:
+            return await self._fetch_coingecko(asset, coin_id)
+        except (httpx.HTTPError, ValueError, KeyError):
+            return self._synthetic_market_snapshot(asset)
 
+    async def _fetch_coingecko(self, asset: AssetInfo, coin_id: str) -> dict:
         url = _COINGECKO_URL.format(coin_id=coin_id)
         headers = {"x-cg-demo-api-key": settings.coingecko_api_key} if settings.coingecko_api_key else {}
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -57,21 +70,38 @@ class CryptoMarketClient:
             payload = resp.json()
 
         market = payload.get("market_data", {})
+        market_cap = float(market.get("market_cap", {}).get("usd", 0.0))
+        fdv = market.get("fully_diluted_valuation", {}).get("usd")
         return {
-            "market_cap_usd": float(market.get("market_cap", {}).get("usd", 0.0)),
+            "market_cap_usd": market_cap,
             "volume_24h_usd": float(market.get("total_volume", {}).get("usd", 0.0)),
             "circulating_supply": float(market.get("circulating_supply", 0.0)),
+            "fdv_usd": float(fdv) if fdv else market_cap,
         }
 
     def _synthetic_market_snapshot(self, asset: AssetInfo) -> dict:
         rng = rng_for(asset.symbol, "market")
         base_cap = _BASE_MARKET_CAP.get(asset.base, 5_000_000_000.0)
         market_cap = base_cap * rng.uniform(0.95, 1.05)
+        fdv_multiplier = _BASE_FDV_MULTIPLIER.get(asset.base, rng.uniform(1.2, 3.0))
         return {
             "market_cap_usd": market_cap,
             "volume_24h_usd": market_cap * rng.uniform(0.02, 0.08),
             "circulating_supply": _CIRCULATING_SUPPLY.get(asset.base, 100_000_000.0),
+            "fdv_usd": market_cap * fdv_multiplier,
         }
+
+    async def fetch_btc_dominance(self) -> float:
+        """BTC's share of total crypto market cap -- the macro backdrop
+        criterion ("over 80% of altcoins move with BTC's swings")."""
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(_COINGECKO_GLOBAL_URL)
+                resp.raise_for_status()
+                payload = resp.json()
+            return float(payload["data"]["market_cap_percentage"]["btc"])
+        except (httpx.HTTPError, ValueError, KeyError):
+            return rng_for("GLOBAL", "btc_dominance").uniform(48.0, 58.0)
 
     def fetch_onchain_metrics(self, asset: AssetInfo) -> OnChainMetrics:
         # No on-chain data provider wired in yet (candidates: Glassnode,

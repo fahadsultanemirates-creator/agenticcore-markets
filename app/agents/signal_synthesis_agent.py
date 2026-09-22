@@ -9,6 +9,7 @@ from app.agents.scoring import clamp
 from app.assets import AssetInfo
 from app.models import (
     ComponentScores,
+    CryptoFundamentalsResult,
     FundamentalsResult,
     NewsAggregationResult,
     SignalCall,
@@ -41,15 +42,28 @@ class SignalSynthesisAgent:
             + news.score * _WEIGHTS["news"]
         )
 
-        if final_score >= _BUY_THRESHOLD:
+        safety_gate_failed = (
+            isinstance(fundamentals, CryptoFundamentalsResult)
+            and fundamentals.safety.has_contract
+            and not fundamentals.safety.passed
+        )
+
+        if safety_gate_failed:
+            # Hard override, not a weighted vote: a failed on-chain safety
+            # gate means skip the trade regardless of how bullish technicals
+            # or news look -- exactly the rule the framework was built
+            # against. This can flip what the composite score alone would
+            # have said.
+            signal = SignalCall.HOLD
+        elif final_score >= _BUY_THRESHOLD:
             signal = SignalCall.BUY
         elif final_score <= _SELL_THRESHOLD:
             signal = SignalCall.SELL
         else:
             signal = SignalCall.HOLD
 
-        confidence = _confidence(final_score, component_scores)
-        reasoning = _build_reasoning(asset, signal, final_score, confidence, technical, fundamentals, news)
+        confidence = 0.95 if safety_gate_failed else _confidence(final_score, component_scores)
+        reasoning = _build_reasoning(asset, signal, final_score, confidence, technical, fundamentals, news, safety_gate_failed)
 
         return SynthesizedSignal(
             symbol=asset.symbol,
@@ -78,12 +92,23 @@ def _build_reasoning(
     technical: TechnicalAnalysisResult,
     fundamentals: FundamentalsResult,
     news: NewsAggregationResult,
+    safety_gate_failed: bool = False,
 ) -> str:
     drivers = [
         f"Technical ({technical.sentiment.value}, score {technical.score:+.2f}): {technical.summary}",
         f"Fundamentals ({fundamentals.sentiment.value}, score {fundamentals.score:+.2f}): {fundamentals.summary}",
         f"News ({news.sentiment.value}, score {news.score:+.2f}): {news.summary}",
     ]
+
+    if safety_gate_failed:
+        assert isinstance(fundamentals, CryptoFundamentalsResult)
+        header = (
+            f"{asset.symbol}: {signal.value} -- SAFETY GATE OVERRIDE. "
+            f"{' '.join(fundamentals.safety.red_flags)} "
+            f"This overrides the composite score (which was {final_score:+.2f}): a failed on-chain safety check "
+            f"means skip this trade regardless of what technicals or news say."
+        )
+        return header + "\n\n" + "\n\n".join(drivers)
 
     sentiments = {technical.sentiment, fundamentals.sentiment, news.sentiment}
     alignment_note = (

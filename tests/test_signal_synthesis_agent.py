@@ -9,7 +9,7 @@ from app.models import (
     TechnicalAnalysisResult,
     TechnicalIndicators,
 )
-from tests.factories import make_forex_fundamentals
+from tests.factories import make_crypto_fundamentals, make_forex_fundamentals
 
 
 def make_technical(score: float, sentiment: Sentiment) -> TechnicalAnalysisResult:
@@ -91,6 +91,40 @@ def test_mixed_neutral_inputs_produce_hold_with_lower_confidence():
     assert mixed.signal == SignalCall.HOLD
     assert mixed.confidence < strong_buy.confidence
     assert "mixed" in mixed.reasoning.lower()
+
+
+def test_failed_safety_gate_overrides_bullish_technical_and_news_to_hold():
+    """This is the core "skip the trade regardless of chart patterns" rule
+    from the safety-gate framework -- a failed gate must win even against
+    a strongly bullish technical + news picture that would otherwise BUY."""
+    asset = get_asset("ACUSD")
+    agent = SignalSynthesisAgent()
+
+    result = agent.synthesize(
+        asset,
+        make_technical(0.9, Sentiment.BULLISH),
+        make_crypto_fundamentals(-0.9, Sentiment.BEARISH, safety_passed=False, red_flags=["Contract is a honeypot."]),
+        make_news(0.9, Sentiment.BULLISH),
+    )
+
+    assert result.signal == SignalCall.HOLD
+    assert "SAFETY GATE OVERRIDE" in result.reasoning
+    assert "honeypot" in result.reasoning.lower()
+
+
+def test_passed_safety_gate_does_not_override_bullish_composite():
+    asset = get_asset("ACUSD")
+    agent = SignalSynthesisAgent()
+
+    result = agent.synthesize(
+        asset,
+        make_technical(0.9, Sentiment.BULLISH),
+        make_crypto_fundamentals(0.8, Sentiment.BULLISH, safety_passed=True),
+        make_news(0.9, Sentiment.BULLISH),
+    )
+
+    assert result.signal == SignalCall.BUY
+    assert "SAFETY GATE OVERRIDE" not in result.reasoning
 
 
 def test_reasoning_includes_each_agent_summary():

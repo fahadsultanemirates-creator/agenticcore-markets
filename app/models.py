@@ -69,11 +69,33 @@ class EconomicEvent(BaseModel):
     previous: str | None = None
 
 
+class RiskRegimeResult(BaseModel):
+    """Global risk-on/risk-off backdrop -- proxied off equities/gold/oil
+    price action pulled through the same price feed as everything else,
+    rather than a dedicated (and mostly paid) risk-sentiment provider."""
+
+    regime: str  # "risk_on" | "risk_off" | "neutral"
+    equities_trend: Sentiment
+    safe_haven_demand: Sentiment  # gold trend as a safe-haven proxy
+
+
+class PositioningResult(BaseModel):
+    """CFTC Commitments of Traders snapshot for one currency's futures."""
+
+    currency: str
+    as_of_report_date: datetime | None
+    net_speculative_position: float | None  # non-commercial longs minus shorts, contracts
+    is_crowded_extreme: bool  # net position near a multi-period high/low -- overextension risk
+    note: str
+
+
 class ForexFundamentalsResult(BaseModel):
     symbol: str
     as_of: datetime
     upcoming_events: list[EconomicEvent]
     central_bank_commentary: str
+    risk_regime: RiskRegimeResult
+    positioning: list[PositioningResult]  # one per currency in the pair
     sentiment: Sentiment
     score: float
     summary: str
@@ -87,14 +109,52 @@ class OnChainMetrics(BaseModel):
     exchange_netflow_24h: float
 
 
+class SafetyGateResult(BaseModel):
+    """On-chain safety gate: contract/honeypot checks + liquidity depth +
+    holder concentration. Only meaningful for an actual token contract
+    (has_contract=True) -- a base-layer asset like BTC/ETH has nothing to
+    audit. `passed=False` is a hard "skip this trade" per the safety-gate
+    framework, enforced as an override in signal_synthesis_agent, not just
+    one more weighted vote."""
+
+    has_contract: bool
+    is_honeypot: bool | None = None
+    is_mintable: bool | None = None
+    is_blacklistable: bool | None = None
+    is_open_source: bool | None = None
+    buy_tax_pct: float | None = None
+    sell_tax_pct: float | None = None
+    top10_holder_pct: float | None = None
+    liquidity_usd: float | None = None
+    liquidity_to_mcap_pct: float | None = None
+    passed: bool
+    red_flags: list[str]
+
+
+class DerivativesResult(BaseModel):
+    """Futures positioning proxy -- open interest, funding rate, and a
+    taker-buy/sell volume delta standing in for full spot-vs-perp CVD
+    (a genuine spot exchange feed for the CVD side isn't wired in yet)."""
+
+    open_interest_usd: float | None = None
+    funding_rate_pct: float | None = None
+    perp_taker_delta_pct: float | None = None  # net taker-buy volume, % of total taker volume
+    regime_note: str
+
+
 class CryptoFundamentalsResult(BaseModel):
     symbol: str
     as_of: datetime
     market_cap_usd: float
     volume_24h_usd: float
     circulating_supply: float
+    fdv_usd: float
+    circulating_to_fdv_pct: float
     onchain: OnChainMetrics
     ecosystem_notes: list[str]
+    safety: SafetyGateResult
+    derivatives: DerivativesResult
+    btc_dominance_pct: float | None = None
     sentiment: Sentiment
     score: float
     summary: str

@@ -1,7 +1,11 @@
-"""Live OHLCV price feed for forex and crypto (TwelveData/Alpha Vantage),
-with deterministic synthetic sample data as a fallback when no API key is
+"""Live OHLCV price feed for forex and crypto (TwelveData), with
+deterministic synthetic sample data as a fallback when no API key is
 configured. Shared by both asset classes so technical_analysis_agent stays
 identical regardless of what it's analyzing.
+
+Also serves two internal-only proxy symbols (XAUUSD, US500USD) that
+forex_fundamentals_agent uses purely to read the global risk-on/risk-off
+regime -- not real tradable assets, not in app/assets.py's registry.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -19,6 +23,9 @@ _BASE_PRICE = {
     "USDJPY": 155.00,
     "BTCUSD": 64000.0,
     "ETHUSD": 3400.0,
+    "ACUSD": 0.0000001,
+    "XAUUSD": 2650.0,
+    "US500USD": 5900.0,
 }
 
 _TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
@@ -74,7 +81,11 @@ class PriceFeedClient:
             ts = now - timedelta(hours=(bars - i))
             drift = rng.uniform(-volatility, volatility)
             open_ = price
-            close = max(0.0001, open_ + drift)
+            # Floor relative to the asset's own price, not a fixed absolute
+            # -- a hardcoded 0.0001 floor would badly distort a sub-cent
+            # token like AC (base price 0.0000001), flattening it to 1000x
+            # its intended value on almost every bar.
+            close = max(base_price * 0.5, open_ + drift)
             high = max(open_, close) + abs(rng.uniform(0, volatility * 0.5))
             low = min(open_, close) - abs(rng.uniform(0, volatility * 0.5))
             volume = rng.uniform(500, 5000) * (10 if asset.asset_type == AssetType.CRYPTO else 1)
