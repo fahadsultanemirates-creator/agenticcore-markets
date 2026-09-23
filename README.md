@@ -180,21 +180,26 @@ request via `?model=claude` or `?model=gemini` on
 - **Claude** (`ANTHROPIC_API_KEY`, model configurable via
   `ANTHROPIC_MODEL`, default `claude-opus-5`) — official `anthropic` SDK,
   `client.messages.parse()` with a Pydantic output schema. High confidence
-  in this pattern (documented, current SDK usage).
+  in this pattern (documented, current SDK usage); not yet live-tested (no
+  key configured when this was built).
 - **Gemini** (`GEMINI_API_KEY`, model configurable via `GEMINI_MODEL`,
-  default `gemini-2.5-flash`) — official `google-genai` SDK. **Moderate
-  confidence** on the exact structured-output parameter shape (Gemini
-  isn't covered by this project's reference material the way Claude is):
-  tries schema-constrained JSON first, falls back to parsing JSON out of
-  plain text on any failure.
+  default `gemini-3.6-flash`) — official `google-genai` SDK, schema-
+  constrained JSON via `response_schema`. **Live-verified**: with a real
+  key, this produces genuine analyst-style verdicts that cite the actual
+  computed technical/fundamentals data (e.g. citing a specific RSI
+  divergence, EMA alignment, and on-chain netflow reading for BTCUSD, and
+  crowded COT positioning for EURUSD) — not templated text. The default
+  model was corrected from `gemini-2.5-flash` after live-testing surfaced
+  that Google retired it for new users in favor of `gemini-3.6-flash`; the
+  plain-text-JSON fallback path is untested (the structured path hasn't
+  needed it) but kept as defense-in-depth.
 - **Never a hard dependency**: if the requested provider's key isn't set,
   or the call fails for any reason (rate limit, network, malformed
   response), `orchestrator.py` falls back to the deterministic formula
   automatically — a trading-signal service can't go down because an LLM
-  provider had an outage. Neither provider was live-tested in this dev
-  environment (no keys configured when this was built, and egress is
-  restricted regardless) — verified via guard-path tests (no key → `None`,
-  malformed key → `None`, never a raised exception) rather than a live call.
+  provider had an outage. Verified via guard-path tests (no key → `None`,
+  malformed key → `None`, never a raised exception) plus, for Gemini, an
+  actual live call.
 - **Cache key includes the model choice** — a `claude` request and a
   `gemini` request for the same symbol within the same TTL window get
   independent cache entries, not whichever one happened to ask first.
@@ -259,16 +264,21 @@ pipeline always runs end-to-end.
 | `cot_report.py` | CFTC COT report — used by both forex and commodity fundamentals (positioning on currency AND commodity futures) | — | **Stub only** — `_fetch_live` raises `NotImplementedError`. Dataset id/schema were never confirmed against a live response, so no speculative parsing code was written against it (same call already made for `econ_calendar.py`/`news_feed.py`) |
 | `news_feed.py` | *(not yet wired — synthetic only)* | `NEWS_API_KEY` | N/A |
 | Physical commodity supply/demand (OPEC output, EIA crude/gas inventories) | — | — | **Not built.** Needs a paid provider, or EIA's API (has a free tier, but its exact schema wasn't confirmed against a live response, so nothing was written against it) |
-| `specialist_agent.py` (Claude) | Anthropic Claude API | `ANTHROPIC_API_KEY` | Written per the current documented SDK pattern (`client.messages.parse` + Pydantic schema); not live-tested (no key configured when built, egress-restricted regardless). Guard paths (no key, invalid key) are tested |
-| `specialist_agent.py` (Gemini) | Google Gemini API | `GEMINI_API_KEY` | Written; **moderate confidence** on the exact structured-output parameter shape (not covered by this project's Claude-focused reference material) — defensive fallback to plain-text JSON parsing on any failure. Not live-tested, same reason as above |
+| `specialist_agent.py` (Claude) | Anthropic Claude API | `ANTHROPIC_API_KEY` | Written per the current documented SDK pattern (`client.messages.parse` + Pydantic schema); not live-tested yet (no key configured when built). Guard paths (no key, invalid key) are tested |
+| `specialist_agent.py` (Gemini) | Google Gemini API | `GEMINI_API_KEY` | **Live-verified** — real key, real call, genuine analyst-style verdicts citing the actual computed evidence (confirmed for BTCUSD and EURUSD). `gemini-3.6-flash` is the corrected default after live-testing showed Google retired `gemini-2.5-flash` for new users. The plain-text-JSON fallback path remains untested (unneeded so far) |
 
 "Unverified in this dev environment" means exactly that, not "broken" —
 the parsing logic is tested against realistic sample payloads shaped like
 each provider's actual documented response format, but the live HTTP call
 itself has never completed successfully because this sandbox's egress
-policy blocks reaching any of these hosts. The first real deployment with
-outbound internet access should smoke-test each live path before trusting
-it for real trading decisions.
+policy blocks reaching most of these hosts (`api.stlouisfed.org`,
+`api.bscscan.com`, `api.coingecko.com`, `api.dexscreener.com`,
+`fapi.binance.com`, and others all returned `connect_rejected`). Gemini's
+API (`generativelanguage.googleapis.com`) is the one exception this
+sandbox can actually reach, which is how it got live-verified above. The
+first real deployment with full outbound internet access should
+smoke-test the remaining live paths before trusting them for real trading
+decisions.
 
 See `.env.example` for the full list.
 

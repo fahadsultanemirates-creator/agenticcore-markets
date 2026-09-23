@@ -12,14 +12,18 @@ provider=...):
 
 - Claude (claude-opus-5 by default): official `anthropic` SDK,
   `client.messages.parse()` with a Pydantic output schema -- the
-  documented, high-confidence structured-output pattern for this SDK.
-- Gemini (gemini-2.5-flash by default): official `google-genai` SDK.
-  MODERATE confidence on the exact structured-output parameter shape --
-  Gemini isn't covered by this project's Claude-focused reference
-  material, so this tries schema-constrained JSON first and falls back to
-  parsing JSON out of plain text on any failure, the same defensive
-  discipline this codebase already applies to its other moderate-
-  confidence integrations (ECB, DefiLlama).
+  documented, high-confidence structured-output pattern for this SDK. Not
+  live-tested yet (no ANTHROPIC_API_KEY configured when this was built).
+- Gemini (gemini-3.6-flash by default): official `google-genai` SDK. The
+  structured-output path (schema-constrained JSON via `response_schema`)
+  is confirmed working against a real live call -- genuine analyst-style
+  verdicts citing the actual computed technical/fundamentals data, not
+  templated text. (Originally defaulted to gemini-2.5-flash; live-testing
+  surfaced that Google retired that model for new users in favor of
+  gemini-3.6-flash, so the default was corrected against the real error
+  response rather than assumed.) The plain-text-JSON fallback below is
+  still untested (the structured path hasn't needed it), kept as
+  defense-in-depth for a future schema/SDK change.
 
 Neither provider is called if its key isn't configured, or if the call
 fails for any reason -- callers (orchestrator.py) fall back to the
