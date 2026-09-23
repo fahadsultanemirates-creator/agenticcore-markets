@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from app.agents.signal_synthesis_agent import SignalSynthesisAgent
+from app.agents.signal_synthesis_agent import SignalSynthesisAgent, safety_gate_failed
 from app.assets import get_asset
 from app.models import (
     NewsAggregationResult,
@@ -140,3 +140,13 @@ def test_reasoning_includes_each_agent_summary():
 
     assert "stub technical summary" in result.reasoning
     assert "stub news summary" in result.reasoning
+
+
+def test_safety_gate_failed_helper_reusable_by_orchestrator():
+    """orchestrator.py imports and reuses this exact check to apply the
+    same hard override on top of the specialist LLM path -- confirms it
+    reads has_contract/passed correctly on its own, independent of the
+    full synthesize() flow."""
+    assert safety_gate_failed(make_crypto_fundamentals(0.5, Sentiment.BULLISH, safety_passed=False)) is True
+    assert safety_gate_failed(make_crypto_fundamentals(0.5, Sentiment.BULLISH, safety_passed=True)) is False
+    assert safety_gate_failed(make_forex_fundamentals(0.5, Sentiment.BULLISH)) is False  # not crypto at all

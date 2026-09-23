@@ -22,6 +22,20 @@ _BUY_THRESHOLD = 0.20
 _SELL_THRESHOLD = -0.20
 
 
+def safety_gate_failed(fundamentals: FundamentalsResult) -> bool:
+    """Shared with orchestrator.py, which applies this same check as a
+    universal override on top of whichever agent produced the signal (this
+    formula, or specialist_agent.py's LLM) -- an LLM reading the evidence
+    could in principle still say BUY on a failed safety gate if nothing
+    enforces the rule outside this class, since it only sees the gate's
+    summary as prose, not as a hard constraint it's bound to obey."""
+    return (
+        isinstance(fundamentals, CryptoFundamentalsResult)
+        and fundamentals.safety.has_contract
+        and not fundamentals.safety.passed
+    )
+
+
 class SignalSynthesisAgent:
     def synthesize(
         self,
@@ -42,13 +56,9 @@ class SignalSynthesisAgent:
             + news.score * _WEIGHTS["news"]
         )
 
-        safety_gate_failed = (
-            isinstance(fundamentals, CryptoFundamentalsResult)
-            and fundamentals.safety.has_contract
-            and not fundamentals.safety.passed
-        )
+        gate_failed = safety_gate_failed(fundamentals)
 
-        if safety_gate_failed:
+        if gate_failed:
             # Hard override, not a weighted vote: a failed on-chain safety
             # gate means skip the trade regardless of how bullish technicals
             # or news look -- exactly the rule the framework was built
@@ -62,8 +72,8 @@ class SignalSynthesisAgent:
         else:
             signal = SignalCall.HOLD
 
-        confidence = 0.95 if safety_gate_failed else _confidence(final_score, component_scores)
-        reasoning = _build_reasoning(asset, signal, final_score, confidence, technical, fundamentals, news, safety_gate_failed)
+        confidence = 0.95 if gate_failed else _confidence(final_score, component_scores)
+        reasoning = _build_reasoning(asset, signal, final_score, confidence, technical, fundamentals, news, gate_failed)
 
         return SynthesizedSignal(
             symbol=asset.symbol,

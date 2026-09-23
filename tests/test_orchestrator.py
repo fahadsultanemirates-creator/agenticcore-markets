@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 import pytest
 
 from app.agents.crypto_fundamentals_agent import CryptoFundamentalsAgent
@@ -5,8 +7,17 @@ from app.agents.news_aggregation_agent import NewsAggregationAgent
 from app.agents.signal_synthesis_agent import SignalSynthesisAgent
 from app.agents.technical_analysis_agent import TechnicalAnalysisAgent
 from app.assets import AssetInfo, AssetType
-from app.models import CommodityFundamentalsResult, CryptoFundamentalsResult, ForexFundamentalsResult, SignalCall
-from app.orchestrator import AnalysisOrchestrator
+from app.models import (
+    ComponentScores,
+    CommodityFundamentalsResult,
+    CryptoFundamentalsResult,
+    ForexFundamentalsResult,
+    Sentiment,
+    SignalCall,
+    SynthesizedSignal,
+)
+from app.orchestrator import AnalysisOrchestrator, _apply_safety_gate_override
+from tests.factories import make_crypto_fundamentals
 
 
 async def test_eurusd_end_to_end_pipeline():
@@ -84,10 +95,16 @@ async def test_model_param_falls_back_to_formula_without_keys_configured(monkeyp
     assert analysis.signal.reasoning
 
 
-async def test_different_model_choices_do_not_share_a_cache_entry():
+async def test_different_model_choices_do_not_share_a_cache_entry(monkeypatch):
     """A 'claude' request and a plain formula request for the same symbol
     within the same TTL window must not collide in the cache -- each
-    model choice gets its own cache key."""
+    model choice gets its own cache key. Tests cache-key isolation, not
+    live LLM behavior, so keys are forced off regardless of what's in the
+    environment -- this must stay fast and free of real API calls."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "anthropic_api_key", None)
+    monkeypatch.setattr(settings, "gemini_api_key", None)
     orch = AnalysisOrchestrator()
 
     plain = await orch.get_analysis("GBPUSD")
@@ -139,3 +156,52 @@ async def test_dynamically_resolved_asset_runs_full_pipeline():
     assert fundamentals.safety.has_contract is True  # has a mapped contract -- the gate actually runs, not skipped
     assert signal.signal in SignalCall
     assert signal.reasoning
+
+
+def _fake_specialist_signal(call: SignalCall) -> SynthesizedSignal:
+    return SynthesizedSignal(
+        symbol="ACUSD",
+        asset_type=AssetType.CRYPTO,
+        as_of=datetime.now(timezone.utc),
+        signal=call,
+        confidence=0.8,
+        component_scores=ComponentScores(technical=0.5, fundamental=0.5, news=0.0),
+        reasoning="A specialist LLM said this looked bullish enough to buy.",
+    )
+
+
+def test_safety_gate_override_forces_hold_even_when_specialist_says_buy():
+    """The core gap this closes: an LLM only ever SEES a failed safety
+    gate as prose in the fundamentals summary -- nothing stops it from
+    still calling BUY if it judges the rest of the evidence bullish
+    enough. This must be forced back to HOLD regardless."""
+    failed_gate_fundamentals = make_crypto_fundamentals(
+        0.5, Sentiment.BULLISH, safety_passed=False, red_flags=["Contract is flagged as a honeypot."]
+    )
+    specialist_signal = _fake_specialist_signal(SignalCall.BUY)
+
+    result = _apply_safety_gate_override(failed_gate_fundamentals, specialist_signal)
+
+    assert result.signal == SignalCall.HOLD
+    assert result.confidence >= 0.95
+    assert "SAFETY GATE OVERRIDE" in result.reasoning
+    assert "honeypot" in result.reasoning
+    assert "A specialist LLM said this looked bullish enough to buy." in result.reasoning  # original reasoning preserved
+
+
+def test_safety_gate_override_is_noop_when_gate_passed():
+    passed_gate_fundamentals = make_crypto_fundamentals(0.5, Sentiment.BULLISH, safety_passed=True)
+    specialist_signal = _fake_specialist_signal(SignalCall.BUY)
+
+    result = _apply_safety_gate_override(passed_gate_fundamentals, specialist_signal)
+
+    assert result is specialist_signal  # untouched, not even a copy
+
+
+def test_safety_gate_override_is_noop_when_specialist_already_said_hold():
+    failed_gate_fundamentals = make_crypto_fundamentals(0.5, Sentiment.BULLISH, safety_passed=False)
+    specialist_signal = _fake_specialist_signal(SignalCall.HOLD)
+
+    result = _apply_safety_gate_override(failed_gate_fundamentals, specialist_signal)
+
+    assert result is specialist_signal  # already HOLD -- no redundant override note appended
