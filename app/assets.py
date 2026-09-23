@@ -6,6 +6,7 @@ from pydantic import BaseModel
 class AssetType(str, Enum):
     FOREX = "forex"
     CRYPTO = "crypto"
+    COMMODITY = "commodity"
 
 
 class AssetInfo(BaseModel):
@@ -21,17 +22,65 @@ class AssetInfo(BaseModel):
     # on-chain, since GoPlus/DexScreener key off (chain_id, contract).
     contract_address: str | None = None
     chain_id: int | None = None  # e.g. 56 = BNB Smart Chain, 1 = Ethereum
+    # CoinGecko coin id (e.g. "bitcoin"), when known -- lets
+    # crypto_market.py fetch real market-cap/volume/FDV/supply for any
+    # resolved token, not just the two hardcoded majors. None for
+    # forex/commodities, and for a crypto asset whose id wasn't resolved
+    # (falls back to synthetic market data, same as before this existed).
+    coingecko_id: str | None = None
+    # True only for an asset built on the fly by asset_resolver.py for an
+    # arbitrary "type any token" lookup that isn't in the static registry
+    # below -- distinguishes a deliberately curated asset from a resolved
+    # one, in case callers ever want to treat them differently (e.g. not
+    # caching a bad resolution as long as a curated symbol).
+    is_dynamic: bool = False
+
+
+# The 8 major currencies (per the standard "28 pairs" forex universe: 8
+# currencies, all pairwise combinations = C(8,2) = 28) with real display
+# names, quoted in conventional FX market order (not alphabetical) --
+# e.g. EURUSD not USDEUR, GBPJPY not JPYGBP.
+_MAJOR_CURRENCIES = ["EUR", "GBP", "AUD", "NZD", "USD", "CAD", "CHF", "JPY"]
+_CURRENCY_NAMES = {
+    "EUR": "Euro",
+    "GBP": "British Pound",
+    "AUD": "Australian Dollar",
+    "NZD": "New Zealand Dollar",
+    "USD": "US Dollar",
+    "CAD": "Canadian Dollar",
+    "CHF": "Swiss Franc",
+    "JPY": "Japanese Yen",
+}
+
+
+def _build_forex_registry() -> dict[str, AssetInfo]:
+    registry: dict[str, AssetInfo] = {}
+    for i, base in enumerate(_MAJOR_CURRENCIES):
+        for quote in _MAJOR_CURRENCIES[i + 1 :]:
+            symbol = f"{base}{quote}"
+            registry[symbol] = AssetInfo(
+                symbol=symbol,
+                display_name=f"{_CURRENCY_NAMES[base]} / {_CURRENCY_NAMES[quote]}",
+                asset_type=AssetType.FOREX,
+                base=base,
+                quote=quote,
+            )
+    return registry
 
 
 # Seed registry. Forex pairs are quoted as BASEQUOTE (e.g. EURUSD); crypto
-# symbols are quoted against USD (e.g. BTCUSD). New assets can be added here
-# without touching agent or orchestration code.
+# and commodity symbols are quoted against USD (e.g. BTCUSD, XAUUSD). New
+# assets can be added here without touching agent or orchestration code --
+# for crypto, a symbol NOT in this static registry is also resolvable on
+# the fly at request time via asset_resolver.py ("type any token").
 _ASSET_REGISTRY: dict[str, AssetInfo] = {
-    "EURUSD": AssetInfo(symbol="EURUSD", display_name="Euro / US Dollar", asset_type=AssetType.FOREX, base="EUR", quote="USD"),
-    "GBPUSD": AssetInfo(symbol="GBPUSD", display_name="British Pound / US Dollar", asset_type=AssetType.FOREX, base="GBP", quote="USD"),
-    "USDJPY": AssetInfo(symbol="USDJPY", display_name="US Dollar / Japanese Yen", asset_type=AssetType.FOREX, base="USD", quote="JPY"),
-    "BTCUSD": AssetInfo(symbol="BTCUSD", display_name="Bitcoin / US Dollar", asset_type=AssetType.CRYPTO, base="BTC", quote="USD"),
-    "ETHUSD": AssetInfo(symbol="ETHUSD", display_name="Ethereum / US Dollar", asset_type=AssetType.CRYPTO, base="ETH", quote="USD"),
+    **_build_forex_registry(),
+    "BTCUSD": AssetInfo(
+        symbol="BTCUSD", display_name="Bitcoin / US Dollar", asset_type=AssetType.CRYPTO, base="BTC", quote="USD", coingecko_id="bitcoin"
+    ),
+    "ETHUSD": AssetInfo(
+        symbol="ETHUSD", display_name="Ethereum / US Dollar", asset_type=AssetType.CRYPTO, base="ETH", quote="USD", coingecko_id="ethereum"
+    ),
     # AgenticCore's own token -- a real BEP-20 contract, live on BSC mainnet
     # (see the agenticcore-token- repo). A concrete real test case for the
     # safety-gate agent, since BTC/ETH above are native assets with no
@@ -44,6 +93,22 @@ _ASSET_REGISTRY: dict[str, AssetInfo] = {
         quote="USD",
         contract_address="0xe9568888a0bc317519957047cf736e134B097768",
         chain_id=56,
+    ),
+    # Commodities -- precious metals + energy, per the framework's "gold,
+    # silver, oil, gas, etc." scope. Handled by a dedicated
+    # commodity_fundamentals_agent (no central bank/currency concepts
+    # apply), sharing the same technical/news/signal engine as forex and
+    # crypto.
+    "XAUUSD": AssetInfo(symbol="XAUUSD", display_name="Gold / US Dollar", asset_type=AssetType.COMMODITY, base="XAU", quote="USD"),
+    "XAGUSD": AssetInfo(symbol="XAGUSD", display_name="Silver / US Dollar", asset_type=AssetType.COMMODITY, base="XAG", quote="USD"),
+    "USOILUSD": AssetInfo(
+        symbol="USOILUSD", display_name="WTI Crude Oil / US Dollar", asset_type=AssetType.COMMODITY, base="USOIL", quote="USD"
+    ),
+    "UKOILUSD": AssetInfo(
+        symbol="UKOILUSD", display_name="Brent Crude Oil / US Dollar", asset_type=AssetType.COMMODITY, base="UKOIL", quote="USD"
+    ),
+    "NATGASUSD": AssetInfo(
+        symbol="NATGASUSD", display_name="Natural Gas / US Dollar", asset_type=AssetType.COMMODITY, base="NATGAS", quote="USD"
     ),
 }
 

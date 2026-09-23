@@ -12,11 +12,6 @@ from app.models import OnChainMetrics
 _COINGECKO_URL = "https://api.coingecko.com/api/v3/coins/{coin_id}"
 _COINGECKO_GLOBAL_URL = "https://api.coingecko.com/api/v3/global"
 
-_COINGECKO_IDS = {
-    "BTC": "bitcoin",
-    "ETH": "ethereum",
-}
-
 _BASE_MARKET_CAP = {
     "BTC": 1_260_000_000_000.0,
     "ETH": 410_000_000_000.0,
@@ -53,11 +48,14 @@ class CryptoMarketClient:
         # setting only raises the rate limit when present) -- unlike
         # TwelveData, there's no reason to gate the live attempt behind
         # having a key at all, only to fall back gracefully if it fails.
-        coin_id = _COINGECKO_IDS.get(asset.base)
-        if coin_id is None:
+        # coingecko_id is set statically for the curated majors (see
+        # assets.py) and dynamically by asset_resolver.py for any other
+        # token resolved at request time -- either way, no live call is
+        # attempted for an asset it was never determined for.
+        if asset.coingecko_id is None:
             return self._synthetic_market_snapshot(asset)
         try:
-            return await self._fetch_coingecko(asset, coin_id)
+            return await self._fetch_coingecko(asset, asset.coingecko_id)
         except (httpx.HTTPError, ValueError, KeyError):
             return self._synthetic_market_snapshot(asset)
 

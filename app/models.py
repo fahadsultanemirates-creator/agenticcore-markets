@@ -179,7 +179,34 @@ class CryptoFundamentalsResult(BaseModel):
     summary: str
 
 
-FundamentalsResult = ForexFundamentalsResult | CryptoFundamentalsResult
+# --- commodity_fundamentals_agent -------------------------------------------
+
+class RateBackdropResult(BaseModel):
+    """Real-yield/USD-rate backdrop -- the actual mechanism by which Fed
+    policy moves non-yielding commodities like gold/silver (higher real
+    yields raise the opportunity cost of holding them; a dovish pivot does
+    the opposite). Sourced from FRED (fed funds rate, 10Y yield) same as
+    forex_fundamentals_agent's USD leg -- None fields mean no FRED key set,
+    not "neutral," and the agent treats it that way."""
+
+    fed_funds_rate_pct: float | None = None
+    ust_10y_yield_pct: float | None = None
+    note: str
+
+
+class CommodityFundamentalsResult(BaseModel):
+    symbol: str
+    as_of: datetime
+    upcoming_events: list[EconomicEvent]  # USD releases that move rates (drives the yield channel)
+    rate_backdrop: RateBackdropResult
+    risk_regime: RiskRegimeResult
+    positioning: PositioningResult  # CFTC COT for this commodity's own futures
+    sentiment: Sentiment
+    score: float
+    summary: str
+
+
+FundamentalsResult = ForexFundamentalsResult | CryptoFundamentalsResult | CommodityFundamentalsResult
 
 
 # --- news_aggregation_agent --------------------------------------------------

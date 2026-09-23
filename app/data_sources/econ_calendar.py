@@ -36,6 +36,26 @@ _EVENT_TEMPLATES = {
         ("Tokyo CPI y/y", "medium"),
         ("Tankan Manufacturing Index", "medium"),
     ],
+    "AUD": [
+        ("RBA Rate Decision", "high"),
+        ("Australia CPI q/q", "high"),
+        ("Employment Change", "medium"),
+    ],
+    "NZD": [
+        ("RBNZ Rate Decision", "high"),
+        ("New Zealand CPI q/q", "high"),
+        ("GDT Price Index", "low"),
+    ],
+    "CAD": [
+        ("BoC Rate Decision", "high"),
+        ("Canada CPI y/y", "high"),
+        ("Employment Change", "medium"),
+    ],
+    "CHF": [
+        ("SNB Rate Decision", "high"),
+        ("Switzerland CPI y/y", "medium"),
+        ("KOF Economic Barometer", "low"),
+    ],
 }
 
 _COMMENTARY = {
@@ -43,6 +63,10 @@ _COMMENTARY = {
     "EUR": "The ECB has signaled caution on further cuts, citing persistent core inflation in services despite softening growth.",
     "GBP": "The Bank of England remains split between hawks concerned about wage growth and doves pointing to slowing consumer demand.",
     "JPY": "The Bank of Japan continues to normalize policy gradually, watching yen weakness and import-driven inflation closely.",
+    "AUD": "The RBA has held a cautious tightening bias, citing resilient labor demand against a slower China-linked commodity outlook.",
+    "NZD": "The RBNZ has signaled it's near the end of its cutting cycle, weighing a cooling domestic economy against sticky non-tradables inflation.",
+    "CAD": "The Bank of Canada has leaned dovish as growth cools, though it remains wary of energy-price-driven inflation swings.",
+    "CHF": "The SNB continues to watch franc strength closely, favoring a cautious rate path over disruptive intervention.",
 }
 
 

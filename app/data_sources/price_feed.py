@@ -18,13 +18,31 @@ from app.data_sources.mock_utils import rng_for
 from app.models import OHLCVBar
 
 _BASE_PRICE = {
-    "EURUSD": 1.0850,
-    "GBPUSD": 1.2700,
-    "USDJPY": 155.00,
+    # Majors
+    "EURUSD": 1.0850, "GBPUSD": 1.2700, "AUDUSD": 0.6600, "NZDUSD": 0.6100,
+    "USDCAD": 1.3600, "USDCHF": 0.8800, "USDJPY": 155.00,
+    # EUR crosses
+    "EURGBP": 0.8540, "EURAUD": 1.6440, "EURNZD": 1.7790, "EURCAD": 1.4760,
+    "EURCHF": 0.9550, "EURJPY": 168.20,
+    # GBP crosses
+    "GBPAUD": 1.9240, "GBPNZD": 2.0810, "GBPCAD": 1.7270, "GBPCHF": 1.1180, "GBPJPY": 196.90,
+    # AUD crosses
+    "AUDNZD": 1.0820, "AUDCAD": 0.8980, "AUDCHF": 0.5810, "AUDJPY": 102.30,
+    # NZD crosses
+    "NZDCAD": 0.8300, "NZDCHF": 0.5370, "NZDJPY": 94.55,
+    # CAD/CHF crosses
+    "CADCHF": 0.6470, "CADJPY": 113.97, "CHFJPY": 176.14,
+    # Crypto
     "BTCUSD": 64000.0,
     "ETHUSD": 3400.0,
     "ACUSD": 0.0000001,
+    # Commodities
     "XAUUSD": 2650.0,
+    "XAGUSD": 31.00,
+    "USOILUSD": 70.00,
+    "UKOILUSD": 74.00,
+    "NATGASUSD": 2.80,
+    # Internal-only risk-regime proxy (see forex_fundamentals_agent.py)
     "US500USD": 5900.0,
 }
 
@@ -72,7 +90,13 @@ class PriceFeedClient:
     def _synthetic_ohlcv(self, asset: AssetInfo, bars: int) -> list[OHLCVBar]:
         rng = rng_for(asset.symbol, "ohlcv")
         base_price = _BASE_PRICE.get(asset.symbol, 100.0)
-        volatility = base_price * (0.006 if asset.asset_type == AssetType.CRYPTO else 0.0015)
+        if asset.asset_type == AssetType.CRYPTO:
+            volatility_pct = 0.006
+        elif asset.asset_type == AssetType.COMMODITY:
+            volatility_pct = 0.012  # oil/gas in particular are more volatile than forex majors
+        else:
+            volatility_pct = 0.0015
+        volatility = base_price * volatility_pct
 
         now = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
         price = base_price

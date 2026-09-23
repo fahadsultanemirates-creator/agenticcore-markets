@@ -1,7 +1,11 @@
 import pytest
 
-from app.assets import AssetType
-from app.models import CryptoFundamentalsResult, ForexFundamentalsResult, SignalCall
+from app.agents.crypto_fundamentals_agent import CryptoFundamentalsAgent
+from app.agents.news_aggregation_agent import NewsAggregationAgent
+from app.agents.signal_synthesis_agent import SignalSynthesisAgent
+from app.agents.technical_analysis_agent import TechnicalAnalysisAgent
+from app.assets import AssetInfo, AssetType
+from app.models import CommodityFundamentalsResult, CryptoFundamentalsResult, ForexFundamentalsResult, SignalCall
 from app.orchestrator import AnalysisOrchestrator
 
 
@@ -54,7 +58,52 @@ async def test_acusd_full_pipeline_runs_safety_gate_for_real_contract():
     assert analysis.signal.signal in SignalCall
 
 
+async def test_xauusd_full_pipeline_uses_commodity_fundamentals():
+    orch = AnalysisOrchestrator()
+    analysis = await orch.get_analysis("XAUUSD")
+
+    assert analysis.symbol == "XAUUSD"
+    assert analysis.asset_type == AssetType.COMMODITY
+    assert isinstance(analysis.fundamentals, CommodityFundamentalsResult)
+    assert analysis.technical.symbol == "XAUUSD"  # same shared technical engine
+    assert analysis.signal.signal in SignalCall
+
+
 async def test_unsupported_symbol_raises_key_error():
+    # A nonsense string, not a real token -- unlike a real symbol
+    # (e.g. DOGEUSD, which asset_resolver.py could genuinely resolve once
+    # it has real internet access), this must 404-equivalent (KeyError)
+    # regardless of environment.
     orch = AnalysisOrchestrator()
     with pytest.raises(KeyError):
-        await orch.get_analysis("DOGEUSD")
+        await orch.get_analysis("NOTAREALTOKENXYZ999")
+
+
+async def test_dynamically_resolved_asset_runs_full_pipeline():
+    """A token not in the curated static registry -- the shape
+    asset_resolver.py builds for an arbitrary 'type any token' lookup --
+    must flow through the exact same technical/fundamentals/news/signal
+    pipeline as a curated asset. Exercised directly against a manually
+    built AssetInfo rather than through live resolution, since this
+    sandbox can't reach CoinGecko to resolve one for real."""
+    dynamic_asset = AssetInfo(
+        symbol="PEPEUSD",
+        display_name="Pepe / US Dollar",
+        asset_type=AssetType.CRYPTO,
+        base="PEPE",
+        quote="USD",
+        contract_address="0x6982508145454ce325ddbe47a25d4ec3d2311933",
+        chain_id=1,
+        coingecko_id="pepe",
+        is_dynamic=True,
+    )
+    technical = await TechnicalAnalysisAgent().analyze(dynamic_asset)
+    fundamentals = await CryptoFundamentalsAgent().analyze(dynamic_asset)
+    news = await NewsAggregationAgent().analyze(dynamic_asset)
+    signal = SignalSynthesisAgent().synthesize(dynamic_asset, technical, fundamentals, news)
+
+    assert technical.symbol == "PEPEUSD"
+    assert isinstance(fundamentals, CryptoFundamentalsResult)
+    assert fundamentals.safety.has_contract is True  # has a mapped contract -- the gate actually runs, not skipped
+    assert signal.signal in SignalCall
+    assert signal.reasoning

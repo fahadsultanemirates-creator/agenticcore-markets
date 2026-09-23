@@ -6,14 +6,16 @@ concurrent subscribers requesting the same symbol share one computation.
 import asyncio
 from datetime import datetime, timezone
 
+from app.agents.commodity_fundamentals_agent import CommodityFundamentalsAgent
 from app.agents.crypto_fundamentals_agent import CryptoFundamentalsAgent
 from app.agents.forex_fundamentals_agent import ForexFundamentalsAgent
 from app.agents.news_aggregation_agent import NewsAggregationAgent
 from app.agents.signal_synthesis_agent import SignalSynthesisAgent
 from app.agents.technical_analysis_agent import TechnicalAnalysisAgent
-from app.assets import AssetType, get_asset
+from app.assets import AssetType, get_asset, is_supported
 from app.cache.cache_layer import TTLCache
 from app.config import settings
+from app.data_sources.asset_resolver import AssetResolver
 from app.models import AssetAnalysis
 
 
@@ -22,17 +24,33 @@ class AnalysisOrchestrator:
         self._technical_agent = TechnicalAnalysisAgent()
         self._forex_fundamentals_agent = ForexFundamentalsAgent()
         self._crypto_fundamentals_agent = CryptoFundamentalsAgent()
+        self._commodity_fundamentals_agent = CommodityFundamentalsAgent()
         self._news_agent = NewsAggregationAgent()
         self._signal_agent = SignalSynthesisAgent()
+        self._asset_resolver = AssetResolver()
         self._cache: TTLCache[AssetAnalysis] = TTLCache(ttl_seconds=settings.analysis_cache_ttl_seconds)
 
     async def get_analysis(self, symbol: str) -> AssetAnalysis:
-        asset = get_asset(symbol)  # raises KeyError for unsupported symbols
+        if is_supported(symbol):
+            asset = get_asset(symbol)
+        else:
+            # Not in the curated registry (28 forex majors, BTC/ETH/AC,
+            # 5 commodities) -- forex and commodities are a closed universe,
+            # so this only makes sense as a crypto token lookup. Resolve it
+            # live via CoinGecko; a genuinely unknown/misspelled symbol
+            # still raises KeyError, same contract as before.
+            resolved = await self._asset_resolver.resolve_crypto(symbol)
+            if resolved is None:
+                raise KeyError(f"Unknown or unsupported symbol: {symbol}")
+            asset = resolved
 
         async def compute() -> AssetAnalysis:
-            fundamentals_agent = (
-                self._forex_fundamentals_agent if asset.asset_type == AssetType.FOREX else self._crypto_fundamentals_agent
-            )
+            if asset.asset_type == AssetType.FOREX:
+                fundamentals_agent = self._forex_fundamentals_agent
+            elif asset.asset_type == AssetType.COMMODITY:
+                fundamentals_agent = self._commodity_fundamentals_agent
+            else:
+                fundamentals_agent = self._crypto_fundamentals_agent
             technical, fundamentals, news = await asyncio.gather(
                 self._technical_agent.analyze(asset),
                 fundamentals_agent.analyze(asset),

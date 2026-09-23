@@ -19,6 +19,16 @@ def test_list_assets_includes_eurusd_and_btcusd():
     assert "BTCUSD" in symbols
 
 
+def test_list_assets_covers_28_forex_pairs_and_commodities():
+    resp = client.get("/api/v1/assets")
+    assert resp.status_code == 200
+    assets = resp.json()
+    forex_symbols = {a["symbol"] for a in assets if a["asset_type"] == "forex"}
+    commodity_symbols = {a["symbol"] for a in assets if a["asset_type"] == "commodity"}
+    assert len(forex_symbols) == 28
+    assert {"XAUUSD", "XAGUSD", "USOILUSD", "UKOILUSD", "NATGASUSD"} <= commodity_symbols
+
+
 def test_analysis_endpoint_eurusd():
     resp = client.get("/api/v1/analysis/EURUSD")
     assert resp.status_code == 200
@@ -44,6 +54,21 @@ def test_analysis_endpoint_acusd_includes_safety_gate():
     assert body["fundamentals"]["safety"]["has_contract"] is True
 
 
+def test_analysis_endpoint_commodity_xauusd():
+    resp = client.get("/api/v1/analysis/XAUUSD")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["symbol"] == "XAUUSD"
+    assert body["asset_type"] == "commodity"
+    assert "rate_backdrop" in body["fundamentals"]
+
+
 def test_analysis_endpoint_unknown_symbol_returns_404():
-    resp = client.get("/api/v1/analysis/DOGEUSD")
+    # A nonsense string, not a real token -- unlike a real symbol
+    # (e.g. DOGEUSD), this must 404 even once dynamic crypto resolution
+    # (asset_resolver.py) has real internet access, since it genuinely
+    # doesn't resolve to anything on CoinGecko. In this sandbox, egress is
+    # blocked entirely, so resolution fails and 404s regardless -- but this
+    # symbol is chosen so the test's assumption holds in both environments.
+    resp = client.get("/api/v1/analysis/NOTAREALTOKENXYZ999")
     assert resp.status_code == 404
