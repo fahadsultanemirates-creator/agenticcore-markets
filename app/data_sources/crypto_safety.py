@@ -39,16 +39,42 @@ def _to_bool_flag(value) -> bool:
     return str(value) == "1"
 
 
+def _synthetic_holder_percentiles(rng) -> dict:
+    """Builds top1/top5/top10/top20 as increments stacked on each other so
+    the result is always monotonically non-decreasing -- four independent
+    random draws could otherwise put (e.g.) top5 above top10, which is
+    impossible in reality since top10 always includes top5's holders."""
+    top1 = rng.uniform(2, 8)
+    top5 = top1 + rng.uniform(2, 8)
+    top10 = top5 + rng.uniform(1, 6)
+    top20 = top10 + rng.uniform(2, 8)
+    return {
+        "top1_holder_pct": round(top1, 2),
+        "top5_holder_pct": round(top5, 2),
+        "top10_holder_pct": round(top10, 2),
+        "top20_holder_pct": round(top20, 2),
+    }
+
+
+_WHALE_THRESHOLD_PCT = 1.0  # an individual wallet holding >=1% of supply counts as a "whale" for this summary
+
+
 def parse_goplus_result(raw: dict) -> dict:
     """Pure parse of one GoPlus token_security result entry (the dict keyed
     by contract address inside `result`) into the fields the safety-gate
-    agent needs."""
+    agent needs -- including whale/holder-concentration visibility, since
+    the full holder list is already being fetched here regardless."""
     holders = raw.get("holders") or []
     # Exclude the LP/router/contract addresses GoPlus already tags as
     # contracts from the "individual whale" concentration check -- an AMM
     # pool holding 40% of supply isn't the same risk as one wallet holding it.
     individual_holders = [h for h in holders if str(h.get("is_contract", 0)) != "1"]
-    top10_pct = sum(_to_float(h.get("percent")) for h in individual_holders[:10]) * 100
+    individual_holders.sort(key=lambda h: _to_float(h.get("percent")), reverse=True)
+
+    def top_n_pct(n: int) -> float:
+        return sum(_to_float(h.get("percent")) for h in individual_holders[:n]) * 100
+
+    whale_count = sum(1 for h in individual_holders if _to_float(h.get("percent")) * 100 >= _WHALE_THRESHOLD_PCT)
 
     return {
         "is_honeypot": _to_bool_flag(raw.get("is_honeypot")),
@@ -57,7 +83,11 @@ def parse_goplus_result(raw: dict) -> dict:
         "is_open_source": _to_bool_flag(raw.get("is_open_source")),
         "buy_tax_pct": _to_float(raw.get("buy_tax")) * 100,
         "sell_tax_pct": _to_float(raw.get("sell_tax")) * 100,
-        "top10_holder_pct": top10_pct,
+        "top1_holder_pct": top_n_pct(1),
+        "top5_holder_pct": top_n_pct(5),
+        "top10_holder_pct": top_n_pct(10),
+        "top20_holder_pct": top_n_pct(20),
+        "whale_count_over_1pct": whale_count,
         "holder_count": int(_to_float(raw.get("holder_count"))),
     }
 
@@ -134,7 +164,13 @@ class CryptoSafetyClient:
             "is_open_source": True,
             "buy_tax_pct": round(rng.uniform(0, 3), 2),
             "sell_tax_pct": round(rng.uniform(0, 3), 2),
-            "top10_holder_pct": round(rng.uniform(8, 25), 2),
+            # top-N percentiles must be monotonically non-decreasing (top20
+            # always includes top10, which always includes top5, etc.) --
+            # built as increments on top of each other rather than four
+            # independent draws, which could otherwise put a smaller
+            # percentile above a larger one.
+            **_synthetic_holder_percentiles(rng),
+            "whale_count_over_1pct": rng.randint(2, 8),
             "holder_count": rng.randint(500, 50_000),
         }
 

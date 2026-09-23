@@ -168,7 +168,11 @@ def _build_safety_gate(
         is_open_source=security.get("is_open_source"),
         buy_tax_pct=security.get("buy_tax_pct"),
         sell_tax_pct=security.get("sell_tax_pct"),
+        top1_holder_pct=security.get("top1_holder_pct"),
+        top5_holder_pct=security.get("top5_holder_pct"),
         top10_holder_pct=top10_pct,
+        top20_holder_pct=security.get("top20_holder_pct"),
+        whale_count_over_1pct=security.get("whale_count_over_1pct"),
         liquidity_usd=liquidity_usd,
         liquidity_to_mcap_pct=liquidity_to_mcap_pct,
         lp_holder_is_contract=lp_holder_is_contract,
@@ -311,6 +315,12 @@ def _build_summary(
             else "No contract to audit (native asset)."
         )
     )
+    whale_note = (
+        f"Whale picture: {safety.whale_count_over_1pct} wallet(s) each hold over 1% of supply; the single largest "
+        f"holds {safety.top1_holder_pct:.1f}%, and the top 5 together hold {safety.top5_holder_pct:.1f}%."
+        if safety.has_contract and safety.whale_count_over_1pct is not None
+        else ""
+    )
     unlock_note = (
         f"WARNING: {next_unlock.next_unlock_pct_of_circulating:.1f}% of circulating supply unlocks in "
         f"{next_unlock.days_until_next_unlock:.0f} days ({next_unlock.description}) -- front-running/dump pressure risk."
@@ -323,7 +333,7 @@ def _build_summary(
     )
 
     return (
-        f"{safety_note} "
+        f"{safety_note} {whale_note} "
         f"Market cap ${snapshot['market_cap_usd']:,.0f} with 24h volume ${snapshot['volume_24h_usd']:,.0f}. "
         f"Circulating supply is {circulating_to_fdv_pct:.0f}% of fully diluted valuation "
         f"(${snapshot['fdv_usd']:,.0f} FDV). {unlock_note} "

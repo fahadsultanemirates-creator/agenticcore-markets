@@ -35,6 +35,9 @@ def test_parse_goplus_result_clean_token():
     # Only the two individual (non-contract) holders count toward
     # concentration -- the LP pool's 40% is excluded.
     assert abs(parsed["top10_holder_pct"] - 8.0) < 1e-9
+    assert abs(parsed["top1_holder_pct"] - 5.0) < 1e-9
+    assert abs(parsed["top5_holder_pct"] - 8.0) < 1e-9
+    assert parsed["whale_count_over_1pct"] == 2  # both individual holders are >=1%
 
 
 def test_parse_goplus_result_flags_honeypot_and_mintable():
@@ -82,9 +85,21 @@ async def test_crypto_safety_client_synthetic_fallback_shape_for_ac_token():
     liquidity = await client.fetch_liquidity(asset)
 
     assert security is not None
-    assert set(security.keys()) >= {"is_honeypot", "is_mintable", "top10_holder_pct", "holder_count"}
+    assert set(security.keys()) >= {
+        "is_honeypot",
+        "is_mintable",
+        "top1_holder_pct",
+        "top5_holder_pct",
+        "top10_holder_pct",
+        "top20_holder_pct",
+        "whale_count_over_1pct",
+        "holder_count",
+    }
     assert liquidity is not None
     assert set(liquidity.keys()) >= {"liquidity_usd", "fdv_usd", "market_cap_usd"}
+    # top-N holder percentiles must be monotonically non-decreasing --
+    # top20 always includes top10's holders, which always includes top5's.
+    assert security["top1_holder_pct"] <= security["top5_holder_pct"] <= security["top10_holder_pct"] <= security["top20_holder_pct"]
 
 
 async def test_crypto_safety_client_none_for_asset_without_contract():

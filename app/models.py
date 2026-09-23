@@ -43,6 +43,23 @@ class TechnicalIndicators(BaseModel):
     atr_14: float
 
 
+class KeyLevel(BaseModel):
+    """A support/resistance zone from the persistent S/R memory system
+    (app/agents/sr_memory.py) -- unlike support_levels/resistance_levels
+    below (a fresh per-request pivot scan over the current bar window),
+    touch_count/hold_count/break_count accumulate across real requests
+    over time via a local database, so strength_label reflects actually
+    tested history ("this level has held 6 of 7 times over 5 weeks"),
+    not just "this bar happens to be a local extreme right now"."""
+
+    price: float
+    kind: str  # "support" | "resistance" -- can flip after a confirmed break
+    touch_count: int
+    hold_count: int
+    break_count: int
+    strength_label: str  # "new" | "weak" | "moderate" | "strong" | "very strong"
+
+
 class TechnicalAnalysisResult(BaseModel):
     symbol: str
     as_of: datetime
@@ -50,6 +67,7 @@ class TechnicalAnalysisResult(BaseModel):
     indicators: TechnicalIndicators
     support_levels: list[float]
     resistance_levels: list[float]
+    key_levels: list[KeyLevel] = []
     volume_poc: float  # point of control: the high-volume-node price level
     rsi_divergence: str | None  # "bullish" | "bearish" | None
     trend: Sentiment
@@ -124,7 +142,13 @@ class SafetyGateResult(BaseModel):
     is_open_source: bool | None = None
     buy_tax_pct: float | None = None
     sell_tax_pct: float | None = None
+    # Whale/holder-concentration visibility -- individual (non-contract)
+    # wallets only, same exclusion rule as top10_holder_pct.
+    top1_holder_pct: float | None = None
+    top5_holder_pct: float | None = None
     top10_holder_pct: float | None = None
+    top20_holder_pct: float | None = None
+    whale_count_over_1pct: int | None = None  # individual wallets each holding >=1% of supply
     liquidity_usd: float | None = None
     liquidity_to_mcap_pct: float | None = None
     # Weaker proxy, not true lock verification -- None means "not checked"

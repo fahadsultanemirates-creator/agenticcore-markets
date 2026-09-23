@@ -24,10 +24,12 @@ BUY/SELL/HOLD signal with reasoning.
   classes. Pulls OHLCV and computes RSI, MACD, moving averages, ATR, 50/200
   EMA alignment, RSI divergence, volume-profile point of control, and
   support/resistance (real swing-high/low pivot detection on the OHLCV
-  series, not a placeholder). For crypto, the price feed tries CoinGecko's
-  OHLC endpoint first (broad token coverage, not just Binance/TwelveData
-  majors) before falling back to TwelveData/synthetic — see "Crypto price
-  data coverage" below for the real limits of this.
+  series, not a placeholder) — plus persistent S/R zone **memory** via
+  `sr_memory.py`, weighted as a primary score component, not a minor nudge
+  (see "Persistent support/resistance memory" below). For crypto, the price
+  feed tries CoinGecko's OHLC endpoint first (broad token coverage, not
+  just Binance/TwelveData majors) before falling back to TwelveData/
+  synthetic — see "Crypto price data coverage" below for the real limits.
 - **`forex_fundamentals_agent`** — economic calendar events, central bank
   commentary for all 8 major currencies, real US macro data
   (rates/CPI/unemployment/payrolls) when a FRED key is set, non-US
@@ -42,27 +44,37 @@ BUY/SELL/HOLD signal with reasoning.
   (OPEC output, EIA inventories) — see the data-sources table for why.
 - **`crypto_fundamentals_agent`** — the on-chain safety gate
   (contract/honeypot checks, liquidity depth, holder concentration, plus a
-  weaker LP-holder-type heuristic), tokenomics (circulating vs. FDV, next
-  scheduled token unlock), derivatives positioning (OI/funding/taker flow on
-  both perp AND spot, so a leverage-only move can be told apart from one
-  spot flow actually confirms), on-chain activity, BTC macro backdrop, and
-  ecosystem notes. A failed safety gate is a hard override enforced in
+  weaker LP-holder-type heuristic), whale/holder-concentration visibility
+  (top1/top5/top10/top20 percentiles and a whale count, all from the same
+  GoPlus holder list the safety gate already fetches), tokenomics
+  (circulating vs. FDV, next scheduled token unlock), derivatives
+  positioning (OI/funding/taker flow on both perp AND spot, so a
+  leverage-only move can be told apart from one spot flow actually
+  confirms), on-chain activity, BTC macro backdrop, and ecosystem notes. A
+  failed safety gate is a hard override enforced in
   `signal_synthesis_agent`, not just one more weighted input — "skip the
   trade regardless of chart patterns." Runs identically whether the asset
   came from the static registry or was resolved on the fly (see below).
 - **`news_aggregation_agent`** — recent timestamped news per asset with
   sentiment, shared across all three asset classes.
-- **`signal_synthesis_agent`** — combines the three inputs into a final
-  signal with a written rationale (not a bare call), subject to the safety
-  gate override above.
+- **`signal_synthesis_agent`** — the deterministic fallback: combines the
+  three inputs into a final signal via a weighted formula with a written
+  rationale (not a bare call), subject to the safety gate override above.
+  Used whenever no specialist LLM is requested, or the requested one isn't
+  available.
+- **`specialist_agent`** — an LLM (Claude or Gemini, chosen per request)
+  that reads the same technical/fundamentals/news evidence and makes the
+  actual final call itself, weighing conflicting signals with judgment
+  rather than a fixed formula. See "Specialist LLM agent" below.
 - **`cache_layer`** — in-memory TTL cache (`app/cache/cache_layer.py`) so
-  concurrent subscribers requesting the same symbol share one computation
-  instead of recomputing per request. Default TTL: 3 minutes
-  (`ANALYSIS_CACHE_TTL_SECONDS`).
+  concurrent subscribers requesting the same symbol (and the same model
+  choice) share one computation instead of recomputing per request.
+  Default TTL: 3 minutes (`ANALYSIS_CACHE_TTL_SECONDS`).
 
 `app/orchestrator.py` wires the agents together per asset (routing to the
-right fundamentals agent by `asset_type`) and fronts them with the cache.
-`app/main.py` exposes the HTTP API.
+right fundamentals agent by `asset_type`, and to the specialist agent or
+the deterministic fallback by the requested `model`) and fronts them with
+the cache. `app/main.py` exposes the HTTP API.
 
 ## Any-token crypto lookup
 
@@ -109,6 +121,88 @@ Either way:
   misleading, not illustrative. If neither provider can be reached (as in
   this dev sandbox — egress-restricted, see below) or doesn't know the
   token, the lookup returns "not found" rather than guessing.
+
+## Persistent support/resistance memory
+
+`app/agents/sr_memory.py` + `app/data_sources/sr_memory_store.py` give
+`technical_analysis_agent` an actual memory, unlike everything else in this
+framework (which recomputes fresh from scratch on every request). This
+exists because real-world results from a live level-based forex system
+back a specific claim: tested support/resistance structure holds up as a
+signal, economic-calendar/news-driven signals don't — so key levels are
+weighted as a **primary** score component here, not a minor nudge like RSI
+divergence.
+
+- **Storage**: a local SQLite file (`SR_MEMORY_DB_PATH`, default
+  `sr_memory.db`) — not a separate database server, zero added
+  infrastructure for a single-process VPS deployment.
+- **Zone clustering**: a new pivot merges into an existing zone within a
+  relative tolerance (0.15% for forex/commodities, 1% for crypto — wider,
+  given crypto's larger effective spreads/volatility); the zone's stored
+  price is a running average that converges over repeated touches.
+- **Hold vs. break, independently detected**: a hold is pivot-anchored (a
+  bounce — price moves away from the zone by more than tolerance without
+  closing through it). A break does **not** require a pivot to form at the
+  break point — a rally already underway can blow straight through a level
+  with no local peak/trough there — so breaks are found by scanning every
+  zone against all bars newer than its last test, independent of pivot
+  detection. A confirmed break flips the zone's kind (classic "old
+  resistance becomes new support") rather than retiring it.
+- **No double-counting**: re-processing the same historical pivot on every
+  request would silently inflate touch counts every time someone just asks
+  for analysis again, without any new market data occurring — a real
+  correctness trap for a "memory" system. A per-symbol watermark (pivots)
+  and a per-zone watermark (breaks) both prevent this; see the module
+  docstrings for the exact mechanism.
+- **Strength labeling**: `new` / `weak` / `moderate` / `strong` / `very
+  strong`, from a score combining hold count, touch count, and break count
+  — surfaced as `key_levels` on `TechnicalAnalysisResult`, and cited by
+  name in the technical summary ("price is near a very strong support at
+  X, tested 6 times, held 5").
+
+This only actually accumulates real history once the service runs
+continuously against live market data over real time — a single request
+(or this sandbox's synthetic OHLCV, which is deterministic per-symbol) only
+exercises the mechanics, not weeks of genuine touch history. Verified via
+unit tests that simulate the accumulation directly (repeated holds, a
+break with a kind-flip, and the watermark preventing reprocessing).
+
+## Specialist LLM agent
+
+`app/agents/specialist_agent.py` is an alternative to the deterministic
+`signal_synthesis_agent` formula: instead of a fixed weighted average, an
+LLM reads the same technical (incl. S/R memory)/fundamentals/news evidence
+and makes the actual BUY/SELL/HOLD call itself, with its own reasoning —
+closer to how a human analyst weighs conflicting signals. Opt in per
+request via `?model=claude` or `?model=gemini` on
+`/api/v1/analysis/{symbol}`; omitting it uses the deterministic formula.
+
+- **Claude** (`ANTHROPIC_API_KEY`, model configurable via
+  `ANTHROPIC_MODEL`, default `claude-opus-5`) — official `anthropic` SDK,
+  `client.messages.parse()` with a Pydantic output schema. High confidence
+  in this pattern (documented, current SDK usage).
+- **Gemini** (`GEMINI_API_KEY`, model configurable via `GEMINI_MODEL`,
+  default `gemini-2.5-flash`) — official `google-genai` SDK. **Moderate
+  confidence** on the exact structured-output parameter shape (Gemini
+  isn't covered by this project's reference material the way Claude is):
+  tries schema-constrained JSON first, falls back to parsing JSON out of
+  plain text on any failure.
+- **Never a hard dependency**: if the requested provider's key isn't set,
+  or the call fails for any reason (rate limit, network, malformed
+  response), `orchestrator.py` falls back to the deterministic formula
+  automatically — a trading-signal service can't go down because an LLM
+  provider had an outage. Neither provider was live-tested in this dev
+  environment (no keys configured when this was built, and egress is
+  restricted regardless) — verified via guard-path tests (no key → `None`,
+  malformed key → `None`, never a raised exception) rather than a live call.
+- **Cache key includes the model choice** — a `claude` request and a
+  `gemini` request for the same symbol within the same TTL window get
+  independent cache entries, not whichever one happened to ask first.
+
+Suggested product framing (from the original discussion this was built
+for): a free/demo tier on Gemini, a paid tier on Claude — this service just
+exposes both; which one a given user gets is a decision for the caller
+(the Telegram bot, or the dashboard) to make per request, not baked in here.
 
 ## Crypto price data coverage (the honest limits)
 
@@ -165,6 +259,8 @@ pipeline always runs end-to-end.
 | `cot_report.py` | CFTC COT report — used by both forex and commodity fundamentals (positioning on currency AND commodity futures) | — | **Stub only** — `_fetch_live` raises `NotImplementedError`. Dataset id/schema were never confirmed against a live response, so no speculative parsing code was written against it (same call already made for `econ_calendar.py`/`news_feed.py`) |
 | `news_feed.py` | *(not yet wired — synthetic only)* | `NEWS_API_KEY` | N/A |
 | Physical commodity supply/demand (OPEC output, EIA crude/gas inventories) | — | — | **Not built.** Needs a paid provider, or EIA's API (has a free tier, but its exact schema wasn't confirmed against a live response, so nothing was written against it) |
+| `specialist_agent.py` (Claude) | Anthropic Claude API | `ANTHROPIC_API_KEY` | Written per the current documented SDK pattern (`client.messages.parse` + Pydantic schema); not live-tested (no key configured when built, egress-restricted regardless). Guard paths (no key, invalid key) are tested |
+| `specialist_agent.py` (Gemini) | Google Gemini API | `GEMINI_API_KEY` | Written; **moderate confidence** on the exact structured-output parameter shape (not covered by this project's Claude-focused reference material) — defensive fallback to plain-text JSON parsing on any failure. Not live-tested, same reason as above |
 
 "Unverified in this dev environment" means exactly that, not "broken" —
 the parsing logic is tested against realistic sample payloads shaped like
@@ -189,9 +285,11 @@ python3 -m venv .venv
   3 crypto)
 - `GET /api/v1/analysis/{symbol}` — e.g. `/api/v1/analysis/EURUSD`,
   `/api/v1/analysis/GBPJPY`, `/api/v1/analysis/XAUUSD`,
-  `/api/v1/analysis/BTCUSD`, or any other crypto symbol not in the
-  registry (e.g. `/api/v1/analysis/DOGEUSD`) — resolved live via
-  `asset_resolver.py`
+  `/api/v1/analysis/BTCUSD`, or any other crypto symbol/contract address
+  not in the registry (e.g. `/api/v1/analysis/DOGEUSD`) — resolved live via
+  `asset_resolver.py`. Optional `?model=claude` or `?model=gemini` to use
+  the specialist LLM agent instead of the deterministic formula (falls back
+  automatically if that provider's key isn't configured).
 
 ## Tests
 
@@ -200,19 +298,23 @@ python3 -m venv .venv
 .venv/bin/python -m pytest -q
 ```
 
-115+ tests. Covers indicator math (including ATR/divergence/volume-profile),
+130+ tests. Covers indicator math (including ATR/divergence/volume-profile),
 cache TTL/concurrency behavior, each agent in isolation (forex, crypto, and
-commodity fundamentals), the new data-source parse functions against
-realistic fixtures, the safety-gate override in signal synthesis, the
-asset-registry shape (28 forex pairs, 5 commodities), the asset-resolver's
-parse functions, and the full orchestrated pipeline end-to-end for EURUSD
-(forex), GBPJPY (forex cross), XAUUSD (commodity), BTCUSD (crypto, no
-contract), ACUSD (crypto, real BEP-20 contract), and a manually-built
-dynamically-resolved asset (proving the pipeline is generic to any
-AssetInfo, not just the curated registry) — proving the shared
-technical/news/signal engine serves all of them unmodified, and that the
-safety gate actually runs for a real token contract in both the curated
-and dynamically-resolved paths.
+commodity fundamentals), the persistent S/R memory system (repeated holds,
+a break with a kind-flip, and the watermark preventing reprocessing — each
+test gets an isolated SQLite file via an autouse fixture in
+`tests/conftest.py`, never the real database), the specialist agent's
+guard paths (no key, invalid key → `None`, never a raised exception), the
+new data-source parse functions against realistic fixtures, the safety-gate
+override in signal synthesis, the asset-registry shape (28 forex pairs, 5
+commodities), the asset-resolver's parse functions (both the symbol-search
+and contract-address paths), and the full orchestrated pipeline end-to-end
+for EURUSD (forex), GBPJPY (forex cross), XAUUSD (commodity), BTCUSD
+(crypto, no contract), ACUSD (crypto, real BEP-20 contract), a
+manually-built dynamically-resolved asset, and the `?model=` param's
+fallback behavior — proving the shared technical/news/signal engine serves
+all of them unmodified, and that the safety gate actually runs for a real
+token contract in both the curated and dynamically-resolved paths.
 
 ## Build order status
 
@@ -223,8 +325,15 @@ and dynamically-resolved paths.
    on-chain safety gate for actual token contracts.
 2b. ✅ Full asset coverage: all 28 forex major pairs, 5 commodities (gold,
     silver, WTI, Brent, nat gas) via a dedicated `commodity_fundamentals_agent`,
-    and any crypto token via `asset_resolver.py` — not just the original
-    3-pair/3-coin seed set.
+    and any crypto token (by symbol OR raw contract address) via
+    `asset_resolver.py` — not just the original 3-pair/3-coin seed set.
+2c. ✅ Persistent support/resistance memory (`sr_memory.py`) weighted as a
+    primary technical-score component, per real-world results showing S/R
+    structure holds up where news/calendar signals don't. Crypto
+    whale/holder-concentration visibility surfaced from data already being
+    fetched. A specialist LLM agent (Claude or Gemini, opt-in per request)
+    that makes the actual final call itself instead of a fixed formula,
+    with the deterministic formula as an always-available fallback.
 3. ⬜ Test end-to-end via the Telegram bot (already built, running on the
    VPS alongside the MT5 forex framework) before wiring into the dashboard.
 4. ⬜ Wire into the dashboard.

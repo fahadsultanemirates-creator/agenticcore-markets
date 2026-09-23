@@ -63,6 +63,23 @@ def test_analysis_endpoint_commodity_xauusd():
     assert "rate_backdrop" in body["fundamentals"]
 
 
+def test_analysis_endpoint_model_param_falls_back_without_keys_configured(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "anthropic_api_key", None)
+    monkeypatch.setattr(settings, "gemini_api_key", None)
+
+    resp = client.get("/api/v1/analysis/USDJPY", params={"model": "gemini"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["signal"]["signal"] in {"BUY", "SELL", "HOLD"}
+
+
+def test_analysis_endpoint_invalid_model_param_returns_422():
+    resp = client.get("/api/v1/analysis/EURUSD", params={"model": "gpt4"})
+    assert resp.status_code == 422
+
+
 def test_analysis_endpoint_unknown_symbol_returns_404():
     # A nonsense string, not a real token -- unlike a real symbol
     # (e.g. DOGEUSD), this must 404 even once dynamic crypto resolution

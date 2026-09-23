@@ -6,3 +6,5 @@ venv/
 .env
 *.egg-info/
 .coverage
+*.db
+*.db-journal

@@ -69,6 +69,38 @@ async def test_xauusd_full_pipeline_uses_commodity_fundamentals():
     assert analysis.signal.signal in SignalCall
 
 
+async def test_model_param_falls_back_to_formula_without_keys_configured(monkeypatch):
+    """No LLM keys configured in this sandbox -- requesting a specialist
+    model must still produce a valid signal via the deterministic formula
+    fallback, never raise or return an incomplete result."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "anthropic_api_key", None)
+    monkeypatch.setattr(settings, "gemini_api_key", None)
+    orch = AnalysisOrchestrator()
+
+    analysis = await orch.get_analysis("EURUSD", model="claude")
+    assert analysis.signal.signal in SignalCall
+    assert analysis.signal.reasoning
+
+
+async def test_different_model_choices_do_not_share_a_cache_entry():
+    """A 'claude' request and a plain formula request for the same symbol
+    within the same TTL window must not collide in the cache -- each
+    model choice gets its own cache key."""
+    orch = AnalysisOrchestrator()
+
+    plain = await orch.get_analysis("GBPUSD")
+    claude = await orch.get_analysis("GBPUSD", model="claude")
+
+    assert plain.cached is False
+    assert claude.cached is False  # different cache key -- not served from the plain request's entry
+
+    plain_again = await orch.get_analysis("GBPUSD")
+    assert plain_again.cached is True
+    assert plain_again.generated_at == plain.generated_at
+
+
 async def test_unsupported_symbol_raises_key_error():
     # A nonsense string, not a real token -- unlike a real symbol
     # (e.g. DOGEUSD, which asset_resolver.py could genuinely resolve once

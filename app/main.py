@@ -1,4 +1,6 @@
-from fastapi import FastAPI, HTTPException
+from typing import Literal
+
+from fastapi import FastAPI, HTTPException, Query
 
 from app.assets import list_assets
 from app.models import AssetAnalysis
@@ -22,8 +24,16 @@ async def get_assets() -> list:
 
 
 @app.get("/api/v1/analysis/{symbol}", response_model=AssetAnalysis)
-async def get_analysis(symbol: str) -> AssetAnalysis:
+async def get_analysis(
+    symbol: str,
+    model: Literal["gemini", "claude"] | None = Query(
+        default=None,
+        description="Specialist LLM to make the final call (e.g. gemini for a free/demo tier, claude for paid). "
+        "Omit to use the deterministic weighted-formula signal. Falls back to the formula automatically if the "
+        "requested provider's key isn't configured or the call fails.",
+    ),
+) -> AssetAnalysis:
     try:
-        return await orchestrator.get_analysis(symbol)
+        return await orchestrator.get_analysis(symbol, model=model)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

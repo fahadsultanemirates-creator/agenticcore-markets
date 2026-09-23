@@ -5,5 +5,12 @@ pydantic-settings==2.5.2
 httpx==0.27.2
 python-dotenv==1.0.1
 
+# Specialist LLM synthesis agent (app/agents/specialist_agent.py) -- both
+# optional at runtime (gated behind ANTHROPIC_API_KEY/GEMINI_API_KEY being
+# set), but importable so the pipeline can actually call them once a key
+# is configured, rather than failing on a missing package at that point.
+anthropic>=0.69.0
+google-genai>=1.0.0
+
 pytest==8.3.3
 pytest-asyncio==0.24.0
