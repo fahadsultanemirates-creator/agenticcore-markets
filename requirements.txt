@@ -12,5 +12,9 @@ python-dotenv==1.0.1
 anthropic>=0.69.0
 google-genai>=1.0.0
 
+# Minimal Telegram bot (bot/telegram_bot.py) -- polling-based, talks to
+# this service over plain HTTP.
+python-telegram-bot==21.6
+
 pytest==8.3.3
 pytest-asyncio==0.24.0

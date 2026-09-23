@@ -40,5 +40,23 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-3.6-flash"
 
+    # Minimal Telegram bot (bot/telegram_bot.py) -- talks to THIS service
+    # over plain HTTP, so it must run on the same host (or one with network
+    # access to it). Not the agency's existing task-manager bot -- a
+    # separate one, dedicated to Markets, per the explicit decision to keep
+    # them apart rather than extend a bot built for something else.
+    telegram_bot_token: str | None = None
+    markets_api_base_url: str = "http://127.0.0.1:8000"
+    # Comma-separated Telegram numeric user ids who get the Claude
+    # specialist instead of Gemini -- the paid-tier bootstrap for testing,
+    # before any real subscription/payment verification exists. Everyone
+    # else gets Gemini. The bot's /start reply shows the caller their own
+    # id so this list is easy to fill in.
+    telegram_claude_allowlist: str = ""
+
+    @property
+    def telegram_claude_allowlist_ids(self) -> set[int]:
+        return {int(part) for part in self.telegram_claude_allowlist.split(",") if part.strip().isdigit()}
+
 
 settings = Settings()
