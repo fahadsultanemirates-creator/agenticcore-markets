@@ -31,5 +31,10 @@ async def test_derivatives_client_synthetic_fallback_shape():
     client = DerivativesClient()
     snapshot = await client.fetch_snapshot(get_asset("BTCUSD"))
 
-    assert set(snapshot.keys()) == {"open_interest_usd", "funding_rate_pct", "perp_taker_delta_pct"}
+    assert set(snapshot.keys()) == {
+        "open_interest_usd",
+        "funding_rate_pct",
+        "perp_taker_delta_pct",
+        "spot_taker_delta_pct",
+    }
     assert snapshot["open_interest_usd"] > 0

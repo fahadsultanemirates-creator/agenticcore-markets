@@ -1,4 +1,4 @@
-from app.agents.crypto_fundamentals_agent import CryptoFundamentalsAgent
+from app.agents.crypto_fundamentals_agent import CryptoFundamentalsAgent, _build_safety_gate
 from app.agents.forex_fundamentals_agent import ForexFundamentalsAgent
 from app.assets import get_asset
 from app.models import Sentiment
@@ -57,3 +57,44 @@ async def test_crypto_fundamentals_agent_runs_safety_gate_for_real_token_contrac
     assert isinstance(result.safety.passed, bool)
     assert result.sentiment in Sentiment
     assert -1.0 <= result.score <= 1.0
+
+
+def _clean_security_liquidity() -> tuple[dict, dict]:
+    security = {
+        "is_honeypot": False,
+        "is_mintable": False,
+        "is_blacklistable": False,
+        "buy_tax_pct": 1.0,
+        "sell_tax_pct": 1.0,
+        "top10_holder_pct": 15.0,
+    }
+    liquidity = {"liquidity_usd": 5_000_000.0}
+    return security, liquidity
+
+
+def test_safety_gate_lp_holder_wallet_adds_soft_red_flag_but_does_not_fail_gate():
+    security, liquidity = _clean_security_liquidity()
+    result, score = _build_safety_gate(
+        security, liquidity, market_cap_usd=10_000_000.0, lp_lock={"top_holder_is_contract": False}
+    )
+    assert result.lp_holder_is_contract is False
+    assert any("personal wallet" in flag for flag in result.red_flags)
+    # A soft signal only -- doesn't flip an otherwise-clean gate to failed.
+    assert result.passed is True
+
+
+def test_safety_gate_lp_holder_contract_adds_no_red_flag():
+    security, liquidity = _clean_security_liquidity()
+    result, score = _build_safety_gate(
+        security, liquidity, market_cap_usd=10_000_000.0, lp_lock={"top_holder_is_contract": True}
+    )
+    assert result.lp_holder_is_contract is True
+    assert result.red_flags == []
+    assert result.passed is True
+
+
+def test_safety_gate_lp_lock_none_leaves_field_unset():
+    security, liquidity = _clean_security_liquidity()
+    result, score = _build_safety_gate(security, liquidity, market_cap_usd=10_000_000.0, lp_lock=None)
+    assert result.lp_holder_is_contract is None
+    assert result.red_flags == []

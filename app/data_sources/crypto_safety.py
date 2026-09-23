@@ -80,6 +80,7 @@ def parse_dexscreener_pairs(pairs: list[dict]) -> dict | None:
         "market_cap_usd": market_cap_usd,
         "volume_24h_usd": volume_24h_usd,
         "dex_id": best.get("dexId"),
+        "pair_address": best.get("pairAddress"),
     }
 
 
@@ -151,4 +152,5 @@ class CryptoSafetyClient:
             "market_cap_usd": market_cap,
             "volume_24h_usd": market_cap * rng.uniform(0.05, 0.4),
             "dex_id": "synthetic",
+            "pair_address": None,
         }

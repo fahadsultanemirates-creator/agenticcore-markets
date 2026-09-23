@@ -11,6 +11,7 @@ from app.models import (
     RiskRegimeResult,
     SafetyGateResult,
     Sentiment,
+    UnlockResult,
 )
 
 
@@ -43,6 +44,7 @@ def make_crypto_fundamentals(
         ecosystem_notes=["stub ecosystem note"],
         safety=SafetyGateResult(has_contract=True, passed=safety_passed, red_flags=red_flags or []),
         derivatives=DerivativesResult(regime_note="stub derivatives note"),
+        next_unlock=UnlockResult(),
         btc_dominance_pct=55.0,
         sentiment=sentiment,
         score=score,

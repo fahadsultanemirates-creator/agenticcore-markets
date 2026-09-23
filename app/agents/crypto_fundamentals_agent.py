@@ -19,7 +19,9 @@ from app.assets import AssetInfo
 from app.data_sources.crypto_market import CryptoMarketClient
 from app.data_sources.crypto_safety import CryptoSafetyClient
 from app.data_sources.derivatives import DerivativesClient
-from app.models import CryptoFundamentalsResult, DerivativesResult, OnChainMetrics, SafetyGateResult
+from app.data_sources.lp_lock_heuristic import LpLockHeuristicClient
+from app.data_sources.token_unlocks import TokenUnlocksClient
+from app.models import CryptoFundamentalsResult, DerivativesResult, OnChainMetrics, SafetyGateResult, UnlockResult
 
 _POSITIVE_WORDS = ("inflow", "accumulat", "record", "grow", "high demand", "reduc", "tightening")
 _NEGATIVE_WORDS = ("outflow", "pressure", "decline", "uncertainty", "compress", "weigh")
@@ -30,6 +32,10 @@ _NEGATIVE_WORDS = ("outflow", "pressure", "decline", "uncertainty", "compress", 
 _MIN_HEALTHY_LIQUIDITY_TO_MCAP_PCT = 10.0
 _MAX_HEALTHY_TOP10_HOLDER_PCT = 30.0
 _FUNDING_EXTREME_PCT = 0.05
+# ">3-5% of circulating supply unlocking within 7-14 days" per the
+# tokenomics framework -- the threshold for "avoid swing longs into this."
+_IMMINENT_UNLOCK_DAYS = 14
+_IMMINENT_UNLOCK_MIN_PCT = 3.0
 
 
 class CryptoFundamentalsAgent:
@@ -38,10 +44,14 @@ class CryptoFundamentalsAgent:
         crypto_market: CryptoMarketClient | None = None,
         safety: CryptoSafetyClient | None = None,
         derivatives: DerivativesClient | None = None,
+        unlocks: TokenUnlocksClient | None = None,
+        lp_lock: LpLockHeuristicClient | None = None,
     ) -> None:
         self._crypto_market = crypto_market or CryptoMarketClient()
         self._safety = safety or CryptoSafetyClient()
         self._derivatives = derivatives or DerivativesClient()
+        self._unlocks = unlocks or TokenUnlocksClient()
+        self._lp_lock = lp_lock or LpLockHeuristicClient()
 
     async def analyze(self, asset: AssetInfo) -> CryptoFundamentalsResult:
         snapshot = await self._crypto_market.fetch_market_snapshot(asset)
@@ -51,10 +61,14 @@ class CryptoFundamentalsAgent:
 
         security_raw = await self._safety.fetch_token_security(asset)
         liquidity_raw = await self._safety.fetch_liquidity(asset, market_cap_usd_hint=snapshot["market_cap_usd"])
-        safety, safety_score = _build_safety_gate(security_raw, liquidity_raw, snapshot["market_cap_usd"])
+        lp_lock_raw = await self._lp_lock.check_top_holder_type(liquidity_raw.get("pair_address") if liquidity_raw else None)
+        safety, safety_score = _build_safety_gate(security_raw, liquidity_raw, snapshot["market_cap_usd"], lp_lock_raw)
 
         derivatives_raw = await self._derivatives.fetch_snapshot(asset)
         derivatives, derivatives_score = _build_derivatives(derivatives_raw)
+
+        unlock_raw = await self._unlocks.fetch_next_unlock(asset, snapshot["circulating_supply"])
+        next_unlock, unlock_score = _build_unlock(unlock_raw)
 
         circulating_to_fdv_pct = (
             (snapshot["market_cap_usd"] / snapshot["fdv_usd"]) * 100 if snapshot["fdv_usd"] > 0 else 100.0
@@ -67,7 +81,8 @@ class CryptoFundamentalsAgent:
         btc_macro_score = _btc_macro_score(asset, btc_dominance_pct)
 
         score = clamp(
-            (netflow_score + turnover_score + ecosystem_score + fdv_score + derivatives_score + btc_macro_score) / 6
+            (netflow_score + turnover_score + ecosystem_score + fdv_score + derivatives_score + btc_macro_score + unlock_score)
+            / 7
         )
         if not safety.passed:
             # Hard override: a failed safety gate dominates regardless of
@@ -77,7 +92,7 @@ class CryptoFundamentalsAgent:
         sentiment = sentiment_from_score(score)
 
         summary = _build_summary(
-            asset, snapshot, onchain, ecosystem_notes, safety, derivatives, circulating_to_fdv_pct, btc_dominance_pct
+            asset, snapshot, onchain, ecosystem_notes, safety, derivatives, next_unlock, circulating_to_fdv_pct, btc_dominance_pct
         )
 
         return CryptoFundamentalsResult(
@@ -92,6 +107,7 @@ class CryptoFundamentalsAgent:
             ecosystem_notes=ecosystem_notes,
             safety=safety,
             derivatives=derivatives,
+            next_unlock=next_unlock,
             btc_dominance_pct=btc_dominance_pct,
             sentiment=sentiment,
             score=score,
@@ -99,7 +115,9 @@ class CryptoFundamentalsAgent:
         )
 
 
-def _build_safety_gate(security: dict | None, liquidity: dict | None, market_cap_usd: float) -> tuple[SafetyGateResult, float]:
+def _build_safety_gate(
+    security: dict | None, liquidity: dict | None, market_cap_usd: float, lp_lock: dict | None = None
+) -> tuple[SafetyGateResult, float]:
     if security is None and liquidity is None:
         # No contract on this asset (e.g. BTC/ETH) -- gate doesn't apply.
         return SafetyGateResult(has_contract=False, passed=True, red_flags=[]), 0.0
@@ -126,6 +144,15 @@ def _build_safety_gate(security: dict | None, liquidity: dict | None, market_cap
     if top10_pct is not None and top10_pct > _MAX_HEALTHY_TOP10_HOLDER_PCT:
         red_flags.append(f"Top 10 individual wallets control {top10_pct:.1f}% of supply -- coordinated sell-off risk.")
 
+    lp_holder_is_contract = lp_lock.get("top_holder_is_contract") if lp_lock else None
+    if lp_holder_is_contract is False:
+        # Soft signal only -- a weaker proxy, not confirmed lock
+        # verification, so it doesn't affect `passed` on its own.
+        red_flags.append(
+            "Top LP holder is a personal wallet, not a contract -- liquidity could be pulled at any time "
+            "(this is a weaker proxy, not confirmed lock verification)."
+        )
+
     passed = not (
         security.get("is_honeypot")
         or security.get("is_mintable")
@@ -144,6 +171,7 @@ def _build_safety_gate(security: dict | None, liquidity: dict | None, market_cap
         top10_holder_pct=top10_pct,
         liquidity_usd=liquidity_usd,
         liquidity_to_mcap_pct=liquidity_to_mcap_pct,
+        lp_holder_is_contract=lp_holder_is_contract,
         passed=passed,
         red_flags=red_flags,
     )
@@ -154,6 +182,7 @@ def _build_safety_gate(security: dict | None, liquidity: dict | None, market_cap
 def _build_derivatives(raw: dict) -> tuple[DerivativesResult, float]:
     funding = raw["funding_rate_pct"]
     taker_delta = raw["perp_taker_delta_pct"]
+    spot_delta = raw["spot_taker_delta_pct"]
 
     if funding > _FUNDING_EXTREME_PCT and taker_delta > 0:
         note = (
@@ -168,22 +197,54 @@ def _build_derivatives(raw: dict) -> tuple[DerivativesResult, float]:
         )
         score = clamp(taker_delta / 25) + 0.25
     elif taker_delta > 5:
-        note = "Taker flow skews net-buy, consistent with fresh long demand rather than short-covering."
+        note = "Perp taker flow skews net-buy, consistent with fresh long demand rather than short-covering."
         score = clamp(taker_delta / 25)
     elif taker_delta < -5:
-        note = "Taker flow skews net-sell, consistent with active distribution."
+        note = "Perp taker flow skews net-sell, consistent with active distribution."
         score = clamp(taker_delta / 25)
     else:
-        note = "Funding and taker flow are both roughly balanced, with no strong positioning skew either way."
+        note = "Funding and perp taker flow are both roughly balanced, with no strong positioning skew either way."
         score = 0.0
+
+    # Spot-vs-perp comparison is the actual "CVD" criterion: a move backed
+    # by real spot buying is higher-conviction than one driven purely by
+    # leveraged perp flow, which tends to unwind fast once liquidations stall.
+    if spot_delta > 5 and taker_delta > 5:
+        note += " Spot flow confirms it (both spot and perp skew net-buy) -- higher-conviction, not purely leverage-driven."
+        score = clamp(score + 0.15)
+    elif taker_delta > 5 and spot_delta < 0:
+        note += " Spot flow does NOT confirm it (perp buying, spot selling) -- this looks like a leverage-only, lower-conviction move."
+        score = clamp(score - 0.15)
 
     result = DerivativesResult(
         open_interest_usd=raw["open_interest_usd"],
         funding_rate_pct=funding,
         perp_taker_delta_pct=taker_delta,
+        spot_taker_delta_pct=spot_delta,
         regime_note=note,
     )
-    return result, clamp(score, -0.4, 0.4)
+    return result, clamp(score, -0.5, 0.5)
+
+
+def _build_unlock(raw: dict | None) -> tuple[UnlockResult, float]:
+    if raw is None:
+        return UnlockResult(), 0.0
+
+    days = raw["days_until_next_unlock"]
+    pct = raw["next_unlock_pct_of_circulating"]
+    is_imminent_large = days <= _IMMINENT_UNLOCK_DAYS and pct >= _IMMINENT_UNLOCK_MIN_PCT
+
+    result = UnlockResult(
+        days_until_next_unlock=days,
+        next_unlock_pct_of_circulating=pct,
+        description=raw["description"],
+        is_imminent_large_unlock=is_imminent_large,
+    )
+    # A large unlock landing soon is front-running/dump pressure regardless
+    # of how healthy everything else looks -- not a hard override like the
+    # safety gate, but a real bearish weight.
+    score = -0.35 if is_imminent_large else clamp(-0.1 * (pct / 5), -0.15, 0.0)
+    return result, score
 
 
 def _netflow_score(onchain: OnChainMetrics) -> float:
@@ -230,6 +291,7 @@ def _build_summary(
     notes: list[str],
     safety: SafetyGateResult,
     derivatives: DerivativesResult,
+    next_unlock: UnlockResult,
     circulating_to_fdv_pct: float,
     btc_dominance_pct: float,
 ) -> str:
@@ -249,12 +311,22 @@ def _build_summary(
             else "No contract to audit (native asset)."
         )
     )
+    unlock_note = (
+        f"WARNING: {next_unlock.next_unlock_pct_of_circulating:.1f}% of circulating supply unlocks in "
+        f"{next_unlock.days_until_next_unlock:.0f} days ({next_unlock.description}) -- front-running/dump pressure risk."
+        if next_unlock.is_imminent_large_unlock
+        else (
+            f"Next unlock: {next_unlock.next_unlock_pct_of_circulating:.1f}% in {next_unlock.days_until_next_unlock:.0f} days -- not imminent/large enough to be a near-term concern."
+            if next_unlock.days_until_next_unlock is not None
+            else "No scheduled unlock data available."
+        )
+    )
 
     return (
         f"{safety_note} "
         f"Market cap ${snapshot['market_cap_usd']:,.0f} with 24h volume ${snapshot['volume_24h_usd']:,.0f}. "
         f"Circulating supply is {circulating_to_fdv_pct:.0f}% of fully diluted valuation "
-        f"(${snapshot['fdv_usd']:,.0f} FDV). "
+        f"(${snapshot['fdv_usd']:,.0f} FDV). {unlock_note} "
         f"On-chain data shows {onchain.active_addresses_24h:,} active addresses and {flow_note}. "
         f"Derivatives: {derivatives.regime_note} "
         f"BTC dominance is {btc_dominance_pct:.1f}%. "

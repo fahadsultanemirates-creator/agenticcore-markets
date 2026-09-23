@@ -13,12 +13,15 @@ a synthesized BUY/SELL/HOLD signal with reasoning.
   support/resistance.
 - **`forex_fundamentals_agent`** — economic calendar events, central bank
   commentary, real US macro data (rates/CPI/unemployment/payrolls) when a
-  FRED key is set, the global risk-on/risk-off regime, and CFTC COT
-  positioning.
+  FRED key is set, non-US growth/current-account data (World Bank) and EUR
+  rate/inflation data (ECB) for the non-USD leg, the global risk-on/risk-off
+  regime, and CFTC COT positioning.
 - **`crypto_fundamentals_agent`** — the on-chain safety gate
-  (contract/honeypot checks, liquidity depth, holder concentration),
-  tokenomics (circulating vs. FDV), derivatives positioning
-  (OI/funding/taker flow), on-chain activity, BTC macro backdrop, and
+  (contract/honeypot checks, liquidity depth, holder concentration, plus a
+  weaker LP-holder-type heuristic), tokenomics (circulating vs. FDV, next
+  scheduled token unlock), derivatives positioning (OI/funding/taker flow on
+  both perp AND spot, so a leverage-only move can be told apart from one
+  spot flow actually confirms), on-chain activity, BTC macro backdrop, and
   ecosystem notes. A failed safety gate is a hard override enforced in
   `signal_synthesis_agent`, not just one more weighted input — "skip the
   trade regardless of chart patterns."
@@ -51,7 +54,11 @@ pipeline always runs end-to-end.
 | `econ_calendar.py` | *(not yet wired — synthetic only)* | `ECON_CALENDAR_API_KEY` | N/A |
 | `crypto_market.py` | CoinGecko (market data + BTC dominance) | `COINGECKO_API_KEY` (optional, keyless works) | Written, parse logic unit-tested against fixtures; live call unverified in this dev environment (egress-restricted) |
 | `crypto_safety.py` | GoPlus (contract security) + DexScreener (liquidity) | — (keyless) | Written, parse logic unit-tested against realistic fixtures; live call unverified in this dev environment |
-| `derivatives.py` | Binance public futures API | — (keyless) | Written, parse logic unit-tested against fixtures; live call unverified in this dev environment |
+| `derivatives.py` | Binance public futures API (OI, funding, perp taker flow) + Binance spot klines (spot taker flow, the actual "CVD" comparison) | — (keyless) | Written, parse logic unit-tested against fixtures; live call unverified in this dev environment |
+| `token_unlocks.py` | DefiLlama emissions/unlocks tracker | — (keyless) | Written, parse logic unit-tested against a realistic fixture; **lower confidence than the row above** — the exact response shape wasn't confirmed against a live response, so parsing is deliberately defensive (broad except, degrades to "no unlock data" rather than a wrong number) |
+| `intl_macro.py` (World Bank half) | World Bank API — GDP growth + current account, per currency's dominant economy | — (keyless) | Written, parse logic unit-tested against the documented `[metadata, data]` shape; high confidence (stable, well-documented public API), live call unverified in this dev environment |
+| `intl_macro.py` (ECB half) | ECB Statistical Data Warehouse — EUR main refi rate + HICP inflation | — (keyless) | Written; **lower confidence** — the exact SDW series keys were not verified against a live response, so any failure degrades to `None` the same as "FRED unavailable" |
+| `lp_lock_heuristic.py` | BscScan — is the top LP-token holder a contract or a wallet | `BSCSCAN_API_KEY` | **Deliberately not true lock verification** — confirming a specific locker service (Unicrypt/PinkLock/etc.) would require guessing that service's exact vault addresses, which was never confirmed and won't be guessed. This checks a narrower, high-confidence fact instead (contract bytecode present or not) and returns `None` ("not checked") rather than a fabricated yes/no when the key is unset or the check fails — never "assumed safe" |
 | `macro_data.py` | FRED (US rates/CPI/unemployment/payrolls) | `FRED_API_KEY` | Written, parse logic unit-tested against fixtures; live call unverified (also requires a key nobody has set yet) |
 | `cot_report.py` | CFTC COT report | — | **Stub only** — `_fetch_live` raises `NotImplementedError`. Dataset id/schema were never confirmed against a live response, so no speculative parsing code was written against it (same call already made for `econ_calendar.py`/`news_feed.py`) |
 | `news_feed.py` | *(not yet wired — synthetic only)* | `NEWS_API_KEY` | N/A |
@@ -104,17 +111,21 @@ a real token contract, not just the two native assets.
 4. ✅ Tier 1 (pure math on existing OHLCV data): ATR, 50/200 EMA alignment,
    RSI divergence, volume-profile POC — live-verified.
 5. 🟡 Tier 2 (free/keyless providers): crypto safety gate (GoPlus +
-   DexScreener), crypto derivatives (Binance), BTC dominance + FDV
-   (CoinGecko) — written and parse-tested against realistic fixtures, live
-   call unverified in this dev environment (egress-restricted; see the
-   Data sources table above).
-6. 🟡 Tier 3 (free-tier-with-signup providers): US macro via FRED — written,
-   requires `FRED_API_KEY` to even attempt the live path.
-7. ⬜ Tier 4 (paid or genuinely hard to source): token unlock/vesting
-   calendars, exchange-to-wallet netflow, non-US inflation/PMI at API
-   quality, CFTC COT (schema not confirmed against a live response, so left
-   as a documented stub rather than unverified guesswork — see
-   `cot_report.py`).
+   DexScreener), crypto derivatives incl. spot CVD (Binance), BTC dominance
+   + FDV (CoinGecko), token unlocks (DefiLlama), non-US growth data (World
+   Bank), EUR rate/inflation (ECB) — written and parse-tested against
+   realistic fixtures, live call unverified in this dev environment
+   (egress-restricted; see the Data sources table above).
+6. 🟡 Tier 3 (free-tier-with-signup providers): US macro via FRED, LP-holder-
+   type heuristic via BscScan — written, each requires its own API key to
+   even attempt the live path.
+7. ⬜ Tier 4 (paid or genuinely hard to source / intentionally scoped down):
+   exchange-to-wallet netflow, non-US PMI at API quality, CFTC COT (schema
+   not confirmed against a live response, so left as a documented stub
+   rather than unverified guesswork — see `cot_report.py`), and true LP-lock
+   verification (which specific locker service, for how long — scoped down
+   to the weaker contract-vs-wallet heuristic in `lp_lock_heuristic.py`
+   instead of guessing at locker contract addresses).
 
 ## Adding a new asset
 

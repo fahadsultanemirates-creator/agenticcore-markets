@@ -127,19 +127,37 @@ class SafetyGateResult(BaseModel):
     top10_holder_pct: float | None = None
     liquidity_usd: float | None = None
     liquidity_to_mcap_pct: float | None = None
+    # Weaker proxy, not true lock verification -- None means "not checked"
+    # (no BSCSCAN_API_KEY set), not "assumed safe". See
+    # lp_lock_heuristic.py for exactly what this does and doesn't prove.
+    lp_holder_is_contract: bool | None = None
     passed: bool
     red_flags: list[str]
 
 
 class DerivativesResult(BaseModel):
-    """Futures positioning proxy -- open interest, funding rate, and a
-    taker-buy/sell volume delta standing in for full spot-vs-perp CVD
-    (a genuine spot exchange feed for the CVD side isn't wired in yet)."""
+    """Futures positioning -- open interest, funding rate -- plus taker
+    buy/sell volume delta on BOTH spot and perp (Binance), so a spot-led
+    move (higher conviction) can be told apart from a perp-only one
+    (speculative, unwinds fast once liquidations stall)."""
 
     open_interest_usd: float | None = None
     funding_rate_pct: float | None = None
     perp_taker_delta_pct: float | None = None  # net taker-buy volume, % of total taker volume
+    spot_taker_delta_pct: float | None = None
     regime_note: str
+
+
+class UnlockResult(BaseModel):
+    """Next scheduled token unlock, when known. None fields mean "no
+    unlock data available" -- a legitimate answer for most tokens (either
+    genuinely no vesting schedule, or not tracked by the data source), not
+    a failure."""
+
+    days_until_next_unlock: float | None = None
+    next_unlock_pct_of_circulating: float | None = None
+    description: str | None = None
+    is_imminent_large_unlock: bool = False
 
 
 class CryptoFundamentalsResult(BaseModel):
@@ -154,6 +172,7 @@ class CryptoFundamentalsResult(BaseModel):
     ecosystem_notes: list[str]
     safety: SafetyGateResult
     derivatives: DerivativesResult
+    next_unlock: UnlockResult
     btc_dominance_pct: float | None = None
     sentiment: Sentiment
     score: float
