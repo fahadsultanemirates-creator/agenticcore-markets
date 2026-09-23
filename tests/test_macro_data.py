@@ -1,6 +1,7 @@
 """Unit tests for the pure parse functions in macro_data.py against
 realistic FRED observation payloads (newest-first, monthly)."""
 
+from app.config import settings
 from app.data_sources.macro_data import MacroDataClient, parse_cpi_yoy, parse_payrolls_change
 
 
@@ -33,6 +34,10 @@ def test_parse_payrolls_change_insufficient_history_returns_none():
     assert parse_payrolls_change([_obs("158200.0")]) is None
 
 
-def test_macro_data_client_unavailable_without_key():
+def test_macro_data_client_unavailable_without_key(monkeypatch):
+    # Explicitly forced to None rather than relying on the environment
+    # being unset -- a real deployment (or a dev .env with a real
+    # FRED_API_KEY configured) must not make this guard-path test fail.
+    monkeypatch.setattr(settings, "fred_api_key", None)
     client = MacroDataClient()
     assert client.is_available() is False
