@@ -111,3 +111,13 @@ def test_volume_profile_poc_finds_high_volume_price_level():
     volumes = [10.0] * len(closes)
     poc = volume_profile_poc(closes, closes, closes, volumes, num_bins=20)
     assert abs(poc - 110.0) <= 1.0  # within one bin width of the dominant price level
+
+
+def test_volume_profile_poc_no_volume_data_falls_back_to_last_close():
+    # A source with no real volume (e.g. CoinGecko's OHLC endpoint) must
+    # not silently concentrate into bin 0 -- that would misleadingly
+    # suggest most trading happened at the period's low.
+    closes = [100.0, 105.0, 95.0, 110.0, 90.0]
+    volumes = [0.0] * len(closes)
+    poc = volume_profile_poc(closes, closes, closes, volumes)
+    assert poc == closes[-1]

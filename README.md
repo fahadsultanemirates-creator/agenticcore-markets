@@ -23,7 +23,11 @@ BUY/SELL/HOLD signal with reasoning.
 - **`technical_analysis_agent`** — shared engine across all three asset
   classes. Pulls OHLCV and computes RSI, MACD, moving averages, ATR, 50/200
   EMA alignment, RSI divergence, volume-profile point of control, and
-  support/resistance.
+  support/resistance (real swing-high/low pivot detection on the OHLCV
+  series, not a placeholder). For crypto, the price feed tries CoinGecko's
+  OHLC endpoint first (broad token coverage, not just Binance/TwelveData
+  majors) before falling back to TwelveData/synthetic — see "Crypto price
+  data coverage" below for the real limits of this.
 - **`forex_fundamentals_agent`** — economic calendar events, central bank
   commentary for all 8 major currencies, real US macro data
   (rates/CPI/unemployment/payrolls) when a FRED key is set, non-US
@@ -62,32 +66,76 @@ right fundamentals agent by `asset_type`) and fronts them with the cache.
 
 ## Any-token crypto lookup
 
-`app/data_sources/asset_resolver.py` resolves a crypto symbol that isn't in
-the curated static registry (`app/assets.py`) at request time, via
-CoinGecko's free/keyless `/search` + `/coins/{id}` endpoints — this is what
-lets someone type an arbitrary token (e.g. into the Telegram bot) and get a
-real signal without it being pre-registered anywhere.
+`app/data_sources/asset_resolver.py` resolves a crypto token that isn't in
+the curated static registry (`app/assets.py`) at request time — this is
+what lets someone type an arbitrary token (e.g. into the Telegram bot) and
+get a real signal without it being pre-registered anywhere. Two entry
+points, chosen automatically by what was typed:
 
+- **A symbol/name** ("PEPE", "PEPEUSD") — via CoinGecko's free/keyless
+  `/search` + `/coins/{id}` endpoints (preferring an exact symbol match
+  over a fuzzy one), reading the matched coin's `platforms` field for a
+  contract address. Only finds tokens CoinGecko has already indexed.
+- **A raw contract address** ("0x...", 42 hex chars) — resolved directly
+  via DexScreener's `/tokens/{address}` endpoint, which queries the
+  chain/DEX itself instead of any index. This closes the gap the
+  symbol-search path can't: a token that's real and has DEX liquidity but
+  is too new or too small for CoinGecko to have indexed yet. A CoinGecko
+  id is still opportunistically looked up afterward (so live market-
+  cap/OHLC data works too if it happens to be indexed); that lookup
+  failing doesn't fail the resolution, it just means market/technical data
+  for that token stays synthetic while safety/liquidity (contract-direct,
+  no index needed) are still real.
+
+Either way:
 - `orchestrator.get_analysis(symbol)` tries the static registry first (the
   28 forex pairs, 5 commodities, and 3 curated crypto assets are a closed,
-  curated universe); on a miss, it treats the symbol as a crypto lookup and
-  calls the resolver.
-- The resolver finds the best-matching CoinGecko coin (preferring an exact
-  symbol match over a fuzzy one), then reads that coin's `platforms` field
-  for a contract address on any chain this framework can actually run the
-  on-chain safety gate against (Ethereum, BSC, Polygon, Arbitrum, Optimism,
-  Base, Avalanche, Fantom — see the chain_id map in that file).
-- A token on an unmapped chain still resolves and gets full
-  technical/fundamentals/news/signal analysis — just without the safety
-  gate (`has_contract=False`, same treatment as BTC/ETH) — since running
-  that check without a confirmed chain_id would be guessing, not checking.
-- A symbol that resolves to nothing real (typo, doesn't exist) raises the
-  same `KeyError` → HTTP 404 as before this existed.
+  curated universe); on a miss, it treats the input as a crypto lookup and
+  calls the resolver, which picks the entry point above based on the
+  input's shape.
+- A contract address is only mapped to the on-chain safety gate on a chain
+  this framework can actually check (Ethereum, BSC, Polygon, Arbitrum,
+  Optimism, Base, Avalanche, Fantom — see the chain_id maps in that file).
+  A token on an unmapped chain, or via the symbol path with an unmapped
+  platform, still resolves and gets full technical/fundamentals/news/signal
+  analysis — just without the safety gate (`has_contract=False`, same
+  treatment as BTC/ETH) — since running that check without a confirmed
+  chain_id would be guessing, not checking.
+- A symbol or address that resolves to nothing real (typo, doesn't exist,
+  no DEX liquidity) raises the same `KeyError` → HTTP 404 as before this
+  existed.
 - No synthetic fallback exists for resolution itself — unlike a data point
   (market cap, RSI, etc.), fabricating what a token *is* would be actively
-  misleading, not illustrative. If CoinGecko can't be reached (as in this
-  dev sandbox — egress-restricted, see below) or doesn't know the token,
-  the lookup returns "not found" rather than guessing.
+  misleading, not illustrative. If neither provider can be reached (as in
+  this dev sandbox — egress-restricted, see below) or doesn't know the
+  token, the lookup returns "not found" rather than guessing.
+
+## Crypto price data coverage (the honest limits)
+
+Different pieces of crypto analysis have genuinely different real-world
+coverage, worth being explicit about rather than implying it's uniform:
+
+- **Fundamentals/safety** (market cap, tokenomics, contract security,
+  liquidity) scale to almost any token — CoinGecko aggregates across many
+  exchanges itself, and GoPlus/DexScreener query the chain/DEX directly by
+  contract address, independent of any listing.
+- **Technicals** (RSI, support/resistance, etc.) use CoinGecko's OHLC
+  endpoint for crypto — broader than Binance/TwelveData, but with two real
+  caveats: no volume data (see `volume_profile_poc`'s zero-volume
+  fallback in `indicators.py`), and coarser candle granularity than the
+  ~hourly bars forex gets (roughly 4-hour candles over a 30-day window,
+  per CoinGecko's free-tier tiering) — still real price action, just a
+  different effective timeframe than the intended ~10-day/hourly view.
+- **Derivatives** (open interest, funding, spot+perp taker flow/CVD) only
+  works for tokens actually trading on Binance. For anything else —
+  most small-cap tokens — this degrades to synthetic. No free provider
+  covers OI/funding broadly across exchanges; this is a real, currently
+  unaddressed gap for the long tail, not just an "unverified" one.
+
+Bottom line: a token resolved dynamically will get real safety/liquidity/
+tokenomics data and real (if coarser) price action, but its derivatives
+positioning read is very likely synthetic unless it happens to be a
+Binance-listed asset.
 
 ## Data sources
 
@@ -101,17 +149,19 @@ pipeline always runs end-to-end.
 
 | Client | Live provider | Env var | Verification status |
 |---|---|---|---|
-| `price_feed.py` | TwelveData | `TWELVEDATA_API_KEY` | Written, never executed against the live API |
+| `price_feed.py` (forex/commodities) | TwelveData | `TWELVEDATA_API_KEY` | Written, never executed against the live API (no key configured) |
+| `price_feed.py` (crypto) | CoinGecko OHLC endpoint — tried first for any crypto asset with a known `coingecko_id`, broader coverage than TwelveData | — (keyless) | Written, parse logic unit-tested against a realistic fixture; **moderate confidence** on the exact day-range→candle-granularity tiering (general shape confirmed, exact cutoffs not verified against a live response); no volume data from this endpoint — see "Crypto price data coverage" above |
 | `econ_calendar.py` | *(not yet wired — synthetic only)* | `ECON_CALENDAR_API_KEY` | N/A |
 | `crypto_market.py` | CoinGecko (market data + BTC dominance) | `COINGECKO_API_KEY` (optional, keyless works) | Written, parse logic unit-tested against fixtures; live call unverified in this dev environment (egress-restricted) |
 | `crypto_safety.py` | GoPlus (contract security) + DexScreener (liquidity) | — (keyless) | Written, parse logic unit-tested against realistic fixtures; live call unverified in this dev environment |
-| `derivatives.py` | Binance public futures API (OI, funding, perp taker flow) + Binance spot klines (spot taker flow, the actual "CVD" comparison) | — (keyless) | Written, parse logic unit-tested against fixtures; live call unverified in this dev environment |
+| `derivatives.py` | Binance public futures API (OI, funding, perp taker flow) + Binance spot klines (spot taker flow, the actual "CVD" comparison) | — (keyless) | Written, parse logic unit-tested against fixtures; live call unverified in this dev environment. **Coverage limit, not a verification issue**: only works for tokens actually listed on Binance — most small-cap/long-tail tokens will always degrade to synthetic here, no free provider covers OI/funding broadly across exchanges |
 | `token_unlocks.py` | DefiLlama emissions/unlocks tracker | — (keyless) | Written, parse logic unit-tested against a realistic fixture; **lower confidence than the row above** — the exact response shape wasn't confirmed against a live response, so parsing is deliberately defensive (broad except, degrades to "no unlock data" rather than a wrong number) |
 | `intl_macro.py` (World Bank half) | World Bank API — GDP growth + current account, per currency's dominant economy | — (keyless) | Written, parse logic unit-tested against the documented `[metadata, data]` shape; high confidence (stable, well-documented public API), live call unverified in this dev environment |
 | `intl_macro.py` (ECB half) | ECB Statistical Data Warehouse — EUR main refi rate + HICP inflation | — (keyless) | Written; **lower confidence** — the exact SDW series keys were not verified against a live response, so any failure degrades to `None` the same as "FRED unavailable" |
 | `lp_lock_heuristic.py` | BscScan — is the top LP-token holder a contract or a wallet | `BSCSCAN_API_KEY` | **Deliberately not true lock verification** — confirming a specific locker service (Unicrypt/PinkLock/etc.) would require guessing that service's exact vault addresses, which was never confirmed and won't be guessed. This checks a narrower, high-confidence fact instead (contract bytecode present or not) and returns `None` ("not checked") rather than a fabricated yes/no when the key is unset or the check fails — never "assumed safe". Key is configured, live call unverified in this dev environment (egress-restricted) |
 | `macro_data.py` | FRED (US rates/CPI/unemployment/payrolls, incl. fed funds + 10Y yield used by `commodity_fundamentals_agent`'s rate backdrop) | `FRED_API_KEY` | Written, parse logic unit-tested against fixtures; key is configured, live call unverified in this dev environment (egress-restricted) |
-| `asset_resolver.py` | CoinGecko `/search` + `/coins/{id}` — resolves an arbitrary crypto symbol not in the static registry | — (keyless) | Written, parse logic unit-tested against realistic fixtures; live call unverified in this dev environment. No synthetic fallback by design — see "Any-token crypto lookup" above |
+| `asset_resolver.py` (symbol path) | CoinGecko `/search` + `/coins/{id}` — resolves a crypto symbol/name not in the static registry | — (keyless) | Written, parse logic unit-tested against realistic fixtures; live call unverified in this dev environment. No synthetic fallback by design — see "Any-token crypto lookup" above |
+| `asset_resolver.py` (address path) | DexScreener `/tokens/{address}` — resolves a raw contract address directly, independent of CoinGecko's index, plus an opportunistic CoinGecko `/coins/{platform}/contract/{address}` id lookup | — (keyless) | Written, parse logic unit-tested against realistic fixtures; live call unverified in this dev environment. DexScreener's own chain-slug naming (e.g. `bsc`, not CoinGecko's `binance-smart-chain`) confirmed only for the chains explicitly mapped in that file |
 | `cot_report.py` | CFTC COT report — used by both forex and commodity fundamentals (positioning on currency AND commodity futures) | — | **Stub only** — `_fetch_live` raises `NotImplementedError`. Dataset id/schema were never confirmed against a live response, so no speculative parsing code was written against it (same call already made for `econ_calendar.py`/`news_feed.py`) |
 | `news_feed.py` | *(not yet wired — synthetic only)* | `NEWS_API_KEY` | N/A |
 | Physical commodity supply/demand (OPEC output, EIA crude/gas inventories) | — | — | **Not built.** Needs a paid provider, or EIA's API (has a free tier, but its exact schema wasn't confirmed against a live response, so nothing was written against it) |
@@ -150,7 +200,7 @@ python3 -m venv .venv
 .venv/bin/python -m pytest -q
 ```
 
-105+ tests. Covers indicator math (including ATR/divergence/volume-profile),
+115+ tests. Covers indicator math (including ATR/divergence/volume-profile),
 cache TTL/concurrency behavior, each agent in isolation (forex, crypto, and
 commodity fundamentals), the new data-source parse functions against
 realistic fixtures, the safety-gate override in signal synthesis, the

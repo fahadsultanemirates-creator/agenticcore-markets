@@ -1,11 +1,14 @@
-"""Live OHLCV price feed for forex and crypto (TwelveData), with
-deterministic synthetic sample data as a fallback when no API key is
-configured. Shared by both asset classes so technical_analysis_agent stays
-identical regardless of what it's analyzing.
+"""Live OHLCV price feed for forex/commodities (TwelveData) and crypto
+(CoinGecko's OHLC endpoint, tried first -- broader token coverage than
+TwelveData, which is forex-oriented and doesn't carry the long tail of
+crypto tokens), with deterministic synthetic sample data as the final
+fallback. Shared by all three asset classes so technical_analysis_agent
+stays identical regardless of what it's analyzing.
 
 Also serves two internal-only proxy symbols (XAUUSD, US500USD) that
-forex_fundamentals_agent uses purely to read the global risk-on/risk-off
-regime -- not real tradable assets, not in app/assets.py's registry.
+forex_fundamentals_agent/commodity_fundamentals_agent use purely to read
+the global risk-on/risk-off regime -- not real tradable assets, not in
+app/assets.py's registry.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -46,14 +49,75 @@ _BASE_PRICE = {
     "US500USD": 5900.0,
 }
 
+def parse_coingecko_ohlc(rows: object) -> list[OHLCVBar] | None:
+    """Pure parse of CoinGecko's OHLC response: a list of
+    [timestamp_ms, open, high, low, close] rows, oldest first. Returns
+    None for a malformed or suspiciously short (<10 bars) response --
+    treated by the caller as "try the next source", not as an error."""
+    if not isinstance(rows, list) or len(rows) < 10:
+        return None
+    return [
+        OHLCVBar(
+            timestamp=datetime.fromtimestamp(row[0] / 1000, tz=timezone.utc),
+            open=float(row[1]),
+            high=float(row[2]),
+            low=float(row[3]),
+            close=float(row[4]),
+            volume=0.0,
+        )
+        for row in rows
+    ]
+
+
 _TWELVEDATA_URL = "https://api.twelvedata.com/time_series"
+_COINGECKO_OHLC_URL = "https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
+# CoinGecko's free-tier OHLC endpoint returns coarser candles the further
+# back you ask (roughly: 30-min candles for 1-2 days, 4-hour for up to 30
+# days, 4-day beyond that) -- 30 days of 4-hour candles is the best
+# density/lookback tradeoff available for a meaningful 50/200-period EMA
+# without falling into the multi-day tier. The exact day-range cutoffs
+# weren't verified against a live response before this was written
+# (moderate confidence, unlike the well-documented base market-data
+# endpoint already used elsewhere in this codebase) -- handled defensively
+# below rather than assuming a specific bar count.
+_COINGECKO_OHLC_DAYS = 30
 
 
 class PriceFeedClient:
     async def fetch_ohlcv(self, asset: AssetInfo, bars: int = 120, interval: str = "1h") -> list[OHLCVBar]:
+        if asset.asset_type == AssetType.CRYPTO:
+            coingecko_bars = await self._fetch_coingecko_ohlc(asset)
+            if coingecko_bars:
+                return coingecko_bars
         if settings.twelvedata_api_key:
             return await self._fetch_twelvedata(asset, bars, interval)
         return self._synthetic_ohlcv(asset, bars)
+
+    async def _fetch_coingecko_ohlc(self, asset: AssetInfo) -> list[OHLCVBar] | None:
+        """Tried first for crypto, keyless, regardless of whether
+        TWELVEDATA_API_KEY is set -- CoinGecko covers far more tokens than
+        TwelveData. Only usable when coingecko_id is known (set statically
+        for curated majors, or dynamically by asset_resolver.py). Returns
+        None (not a fabricated bar list) on any failure or a suspiciously
+        short response, so the caller falls through to its next source.
+
+        Does NOT include volume -- this endpoint doesn't return it. Bars
+        from this source carry volume=0.0, which volume_profile_poc treats
+        as "no real volume data" and degrades to a neutral fallback rather
+        than a misleading result.
+        """
+        if not asset.coingecko_id:
+            return None
+        try:
+            url = _COINGECKO_OHLC_URL.format(coin_id=asset.coingecko_id)
+            headers = {"x-cg-demo-api-key": settings.coingecko_api_key} if settings.coingecko_api_key else {}
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(url, headers=headers, params={"vs_currency": "usd", "days": _COINGECKO_OHLC_DAYS})
+                resp.raise_for_status()
+                rows = resp.json()
+            return parse_coingecko_ohlc(rows)
+        except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError):
+            return None
 
     async def _fetch_twelvedata(self, asset: AssetInfo, bars: int, interval: str) -> list[OHLCVBar]:
         td_symbol = f"{asset.base}/{asset.quote}"

@@ -139,6 +139,14 @@ def volume_profile_poc(highs: list[float], lows: list[float], closes: list[float
     happened, not just the extremes."""
     if not closes:
         return 0.0
+    if sum(volumes) <= 0:
+        # No real volume data for this bar set (e.g. CoinGecko's OHLC
+        # endpoint, used for broad crypto coverage in price_feed.py,
+        # doesn't return volume) -- a volume-weighted POC is meaningless
+        # here. The current price is a more honest neutral fallback than
+        # silently concentrating everything into bin 0, which an all-zero
+        # volumes list would otherwise do.
+        return closes[-1]
 
     typical_prices = [(h + l + c) / 3 for h, l, c in zip(highs, lows, closes)]
     lo, hi = min(typical_prices), max(typical_prices)
